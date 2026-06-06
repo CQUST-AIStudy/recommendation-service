@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import health, recommendation, skill_profile
+from app.api import health, recommendation, skill_profile, webhook
 from app.core.config import get_settings
 from app.core.responses import ApiError, api_error_response
 from app.db import mysql_client
@@ -52,6 +52,8 @@ async def unhandled_error_handler(_request: Request, exc: Exception):
 app.include_router(health.router)
 app.include_router(skill_profile.router)
 app.include_router(recommendation.router)
+app.include_router(webhook.router)
+app.include_router(webhook.internal_router)
 
 
 @app.on_event("shutdown")

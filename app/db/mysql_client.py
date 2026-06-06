@@ -365,3 +365,161 @@ def find_feedback_by_student(student_id: int, limit: int = 300) -> list[dict[str
             (student_id, limit),
         )
         return cur.fetchall()
+
+
+# ──────────────────────────────────────────
+# PTA unified schema queries (spider-repo)
+# ──────────────────────────────────────────
+
+def find_student_by_student_no(student_no: str) -> dict[str, Any] | None:
+    """Lookup student_profile by student_no (学号)."""
+    with query() as cur:
+        cur.execute(
+            "SELECT * FROM student_profile WHERE student_no = %s LIMIT 1",
+            (student_no,),
+        )
+        return cur.fetchone()
+
+
+def find_student_by_id(student_id: int) -> dict[str, Any] | None:
+    """Lookup student_profile by id."""
+    with query() as cur:
+        cur.execute(
+            "SELECT * FROM student_profile WHERE id = %s LIMIT 1",
+            (student_id,),
+        )
+        return cur.fetchone()
+
+
+def find_problem_attempts_for_student(student_id: int) -> list[dict[str, Any]]:
+    """Get all problem attempts for a student from unified schema."""
+    with query() as cur:
+        cur.execute(
+            """SELECT spa.*, ap.title AS problem_title, ap.source_problem_id,
+                      ao.title_override AS offering_title
+            FROM student_problem_attempt spa
+            LEFT JOIN assignment_problem ap ON spa.problem_id = ap.id
+            LEFT JOIN assignment_offering ao ON spa.offering_id = ao.id
+            WHERE spa.student_id = %s
+            ORDER BY spa.submitted_at""",
+            (student_id,),
+        )
+        return cur.fetchall()
+
+
+def find_problem_states_for_student(student_id: int) -> list[dict[str, Any]]:
+    """Get latest problem states for a student."""
+    with query() as cur:
+        cur.execute(
+            """SELECT sps.*, ap.title AS problem_title, ap.source_problem_id
+            FROM student_problem_state sps
+            LEFT JOIN assignment_problem ap ON sps.problem_id = ap.id
+            WHERE sps.student_id = %s""",
+            (student_id,),
+        )
+        return cur.fetchall()
+
+
+def find_assignments_for_student(student_id: int) -> list[dict[str, Any]]:
+    """Get assignment records for a student."""
+    with query() as cur:
+        cur.execute(
+            "SELECT * FROM student_assignment WHERE student_id = %s",
+            (student_id,),
+        )
+        return cur.fetchall()
+
+
+def find_all_problems_for_assignments(offering_ids: list[int]) -> list[dict[str, Any]]:
+    """Get all problems for given assignment offerings."""
+    if not offering_ids:
+        return []
+    placeholders = ",".join(["%s"] * len(offering_ids))
+    with query() as cur:
+        cur.execute(
+            f"SELECT * FROM assignment_problem WHERE offering_id IN ({placeholders})",
+            offering_ids,
+        )
+        return cur.fetchall()
+
+
+def find_students_by_class(class_id: int) -> list[dict[str, Any]]:
+    """Get all student_profile IDs in a teaching class."""
+    with query() as cur:
+        cur.execute(
+            """SELECT sp.* FROM student_profile sp
+            INNER JOIN class_member cm ON sp.id = cm.student_id
+            WHERE cm.class_id = %s""",
+            (class_id,),
+        )
+        return cur.fetchall()
+
+
+def find_offering_ids_for_class(class_id: int) -> list[int]:
+    """Get all assignment_offering IDs for a teaching class."""
+    with query() as cur:
+        cur.execute(
+            "SELECT id FROM assignment_offering WHERE class_id = %s",
+            (class_id,),
+        )
+        return [row["id"] for row in cur.fetchall()]
+
+
+def find_problems_by_source_ids(source_problem_ids: list[str]) -> list[dict[str, Any]]:
+    """Find assignment_problems by source_problem_id (PTA problem IDs)."""
+    if not source_problem_ids:
+        return []
+    placeholders = ",".join(["%s"] * len(source_problem_ids))
+    with query() as cur:
+        cur.execute(
+            f"SELECT * FROM assignment_problem WHERE source_problem_id IN ({placeholders})",
+            source_problem_ids,
+        )
+        return cur.fetchall()
+
+
+# ──────────────────────────────────────────
+# Legacy schema queries (spider-repo sync_to_db.py)
+# ──────────────────────────────────────────
+
+def find_legacy_submit_situation(student_id: int) -> list[dict[str, Any]]:
+    """Get submission history from legacy submit_situation table."""
+    with query() as cur:
+        cur.execute(
+            "SELECT * FROM submit_situation WHERE student_id = %s",
+            (student_id,),
+        )
+        return cur.fetchall()
+
+
+def find_legacy_problem_score_detail(student_id: int) -> list[dict[str, Any]]:
+    """Get problem score details from legacy table."""
+    with query() as cur:
+        cur.execute(
+            "SELECT * FROM problem_score_detail WHERE student_id = %s",
+            (student_id,),
+        )
+        return cur.fetchall()
+
+
+# ──────────────────────────────────────────
+# PTA tag mapping
+# ──────────────────────────────────────────
+
+def find_pta_tag_mappings() -> list[dict[str, Any]]:
+    """Get all PTA-to-LeetCode tag mappings."""
+    with query() as cur:
+        cur.execute("SELECT * FROM pta_tag_mapping")
+        return cur.fetchall()
+
+
+def upsert_pta_tag_mapping(mapping: dict[str, Any]) -> None:
+    with transaction() as cur:
+        cur.execute(
+            """INSERT INTO pta_tag_mapping (pta_keyword, leetcode_tag, relevance)
+            VALUES (%(pta_keyword)s, %(leetcode_tag)s, %(relevance)s)
+            ON DUPLICATE KEY UPDATE
+                leetcode_tag = VALUES(leetcode_tag),
+                relevance = VALUES(relevance)""",
+            mapping,
+        )

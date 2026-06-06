@@ -32,7 +32,8 @@ logger = logging.getLogger(__name__)
 _engine: UnifiedStateEngine | None = None
 
 
-def _get_engine() -> UnifiedStateEngine:
+def get_engine() -> UnifiedStateEngine:
+    """获取统一知识状态引擎单例（可供其他模块调用）。"""
     global _engine
     if _engine is None:
         s = get_settings()
@@ -211,7 +212,7 @@ def update_skill_after_practice(
     """
     练习后更新画像（完整 BKT + 遗忘 + Wilson 流程）。
     """
-    engine = _get_engine()
+    engine = get_engine()
 
     state = db_mod.find_skill_state(student_id, tag_name)
     if state is None:
@@ -276,7 +277,7 @@ def decay_all_skills(days_threshold: int = 1) -> int:
     """
     定时衰减任务：对所有超过 days_threshold 天没练习的技能进行非累积遗忘衰减。
     """
-    engine = _get_engine()
+    engine = get_engine()
     skills = db_mod.find_skills_needing_decay(days_threshold)
     updated = 0
 
