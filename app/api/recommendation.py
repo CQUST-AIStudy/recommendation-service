@@ -79,13 +79,33 @@ def get_recommendation_result(requestId: str):
         for row in raw_items:
             problem_info = None
             if row.get("title_main"):
+                # 查询题目标签
+                tag_rows = db_mod.find_tags_for_problem(row["problem_id"])
+                tag_names = [t["tag_name"] for t in tag_rows if t.get("tag_name")]
                 problem_info = RecommendProblemInfo(
                     problem_id=row["problem_id"],
                     title=row.get("title_main", ""),
                     difficulty=row.get("difficulty", ""),
                     source_url=row.get("source_url"),
                     estimated_minutes=row.get("estimated_minutes", 30),
+                    tags=tag_names,
                 )
+
+            # 查询关联技能的遗忘分数（通过题目标签关联到学生技能状态）
+            forgetting_score = -1.0  # 默认值：-1 表示未学习/新知识点
+            last_practice_at = None
+            matched_tag = row.get("matched_tag")
+            if not matched_tag and tag_names:
+                matched_tag = tag_names[0]  # 使用第一个知识点标签
+            if matched_tag:
+                skill_state = db_mod.find_skill_state(req.get("student_id", 0), matched_tag)
+                if skill_state:
+                    forgetting_score = float(skill_state.get("forgetting_score", 0))
+                    lpa = skill_state.get("last_practice_at")
+                    last_practice_at = str(lpa) if lpa else None
+                else:
+                    logger.debug("No skill state for student=%s tag=%s, using default forgetting_score=-1",
+                                 req.get("student_id"), matched_tag)
 
             items.append(RecommendItemResponse(
                 rank_no=row["rank_no"],
@@ -98,6 +118,8 @@ def get_recommendation_result(requestId: str):
                 score_quality=float(row.get("score_quality", 0)),
                 reason_text=row.get("reason_text", ""),
                 problem=problem_info,
+                forgetting_score=forgetting_score,
+                last_practice_at=last_practice_at,
             ))
 
         return api_success(ResultResponse(
@@ -192,13 +214,33 @@ def generate_recommendation_sync(request: SyncRequest):
         for row in raw_items:
             problem_info = None
             if row.get("title_main"):
+                tag_rows = db_mod.find_tags_for_problem(row["problem_id"])
+                tag_names = [t["tag_name"] for t in tag_rows if t.get("tag_name")]
                 problem_info = RecommendProblemInfo(
                     problem_id=row["problem_id"],
                     title=row.get("title_main", ""),
                     difficulty=row.get("difficulty", ""),
                     source_url=row.get("source_url"),
                     estimated_minutes=row.get("estimated_minutes", 30),
+                    tags=tag_names,
                 )
+
+            forgetting_score = -1.0  # 默认值：-1 表示未学习/新知识点
+            last_practice_at = None
+            # 通过题目标签关联到学生技能状态获取遗忘分数
+            matched_tag = row.get("matched_tag")
+            if not matched_tag and tag_names:
+                matched_tag = tag_names[0]
+            if matched_tag:
+                skill_state = db_mod.find_skill_state(request.student_id, matched_tag)
+                if skill_state:
+                    forgetting_score = float(skill_state.get("forgetting_score", 0))
+                    lpa = skill_state.get("last_practice_at")
+                    last_practice_at = str(lpa) if lpa else None
+                else:
+                    logger.debug("No skill state for student=%s tag=%s, using default forgetting_score=-1",
+                                 request.student_id, matched_tag)
+
             items.append(RecommendItemResponse(
                 rank_no=row["rank_no"],
                 problem_id=row["problem_id"],
@@ -210,6 +252,8 @@ def generate_recommendation_sync(request: SyncRequest):
                 score_quality=float(row.get("score_quality", 0)),
                 reason_text=row.get("reason_text", ""),
                 problem=problem_info,
+                forgetting_score=forgetting_score,
+                last_practice_at=last_practice_at,
             ))
 
         return api_success(ResultResponse(

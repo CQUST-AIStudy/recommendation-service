@@ -30,6 +30,7 @@ class RecommendProblemInfo(BaseModel):
     difficulty: str = Field("", alias="difficulty")
     source_url: str | None = Field(None, alias="sourceUrl")
     estimated_minutes: int = Field(30, alias="estimatedMinutes")
+    tags: list[str] = Field(default_factory=list, alias="tags")
 
     model_config = {"populate_by_name": True}
 
@@ -45,6 +46,8 @@ class RecommendItemResponse(BaseModel):
     score_quality: float = Field(..., alias="scoreQuality")
     reason_text: str = Field(..., alias="reasonText")
     problem: RecommendProblemInfo | None = Field(None, alias="problem")
+    forgetting_score: float | None = Field(None, alias="forgettingScore")
+    last_practice_at: str | None = Field(None, alias="lastPracticeAt")
 
     model_config = {"populate_by_name": True}
 

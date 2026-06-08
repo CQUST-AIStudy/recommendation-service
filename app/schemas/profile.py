@@ -33,6 +33,7 @@ class SkillStateResponse(BaseModel):
     confidence_score: float = Field(..., alias="confidenceScore")
     attempt_count: int = Field(..., alias="attemptCount")
     success_count: int = Field(..., alias="successCount")
+    last_practice_at: str | None = Field(None, alias="lastPracticeAt")
 
     model_config = {"populate_by_name": True}
 

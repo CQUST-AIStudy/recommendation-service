@@ -40,6 +40,7 @@ def update_skill(request: SkillUpdateRequest):
             confidence_score=result["confidence_score"],
             attempt_count=result["attempt_count"],
             success_count=result["success_count"],
+            last_practice_at=str(result["last_practice_at"]) if result.get("last_practice_at") else None,
         ).model_dump(by_alias=True))
     except ApiError:
         raise
@@ -66,6 +67,7 @@ def batch_update_skills(request: BatchSkillUpdateRequest):
                 confidence_score=r["confidence_score"],
                 attempt_count=r["attempt_count"],
                 success_count=r["success_count"],
+                last_practice_at=str(r["last_practice_at"]) if r.get("last_practice_at") else None,
             ).model_dump(by_alias=True)
             for r in results
         ])
@@ -103,6 +105,7 @@ def get_skill_profile(studentId: int):
                 confidence_score=float(s["confidence_score"]),
                 attempt_count=s["attempt_count"],
                 success_count=s["success_count"],
+                last_practice_at=str(s["last_practice_at"]) if s.get("last_practice_at") else None,
             ).model_dump(by_alias=True)
             for s in states
         ])
