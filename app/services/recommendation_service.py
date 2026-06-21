@@ -62,6 +62,7 @@ def _get_weights() -> dict[str, float]:
         "novelty": s.weight_novelty,
         "quality": s.weight_quality,
         "repeat_penalty": s.weight_repeat_penalty,
+        "wrong_question": s.weight_wrong_question,
     }
 
 
@@ -102,10 +103,23 @@ def _generate_recommendation_sync(student_id: int, limit: int, request_id: str) 
         logger.info("Student %s has no skill profile, using fallback", student_id)
         return _fallback_recommendations(student_id, limit, request_id)
 
-    # Step 2: 反馈上下文
+    # Step 2: 反馈上下文 + 错题本上下文
     feedback_ctx = build_feedback_context(student_id)
 
-    # Step 3: 多路召回
+    from app.services.wrong_question_features import (
+        load_wrong_question_context_by_id,
+        reset_cache_for_request,
+    )
+    # Each recommendation request gets a fresh wrong-question snapshot so we
+    # never serve stale tag counts within a single pipeline run.
+    reset_cache_for_request()
+    try:
+        wrong_question_ctx = load_wrong_question_context_by_id(student_id)
+    except Exception as exc:
+        logger.warning("Failed to load wrong-question context for student %s: %s", student_id, exc)
+        wrong_question_ctx = None
+
+    # Step 3: 多路召回 (含错题本召回源)
     candidates = collect_candidates(
         skill_profile,
         feedback_ctx,
@@ -113,6 +127,7 @@ def _generate_recommendation_sync(student_id: int, limit: int, request_id: str) 
         weak_ratio=settings.recall_weak_ratio,
         diff_ratio=settings.recall_difficulty_ratio,
         explore_ratio=settings.recall_exploration_ratio,
+        student_id=student_id,
     )
 
     if not candidates:
@@ -135,6 +150,7 @@ def _generate_recommendation_sync(student_id: int, limit: int, request_id: str) 
         feedback_ctx.get("score_adjustments"),
         weights,
         problem_tags_map,
+        wrong_question_ctx,
     )
 
     # Step 5: 多样性重排

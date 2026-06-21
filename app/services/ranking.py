@@ -180,9 +180,10 @@ def rank_and_score(
     feedback_adjustments: dict[int, float] | None,
     weights: dict[str, float],
     problem_tags_map: dict[int, list[dict[str, Any]]] | None = None,
+    wrong_question_ctx: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """
-    六因子加权排序。
+    六因子加权排序 + 错题本加权 (seventh factor).
 
     Returns list of dicts with scores.
     """
@@ -191,12 +192,15 @@ def rank_and_score(
     else:
         avg_mastery = sum(s.get("mastery_score") or 50 for s in skill_profile) / len(skill_profile)
 
-    w_nm = weights.get("need_match", 0.45)
+    w_nm = weights.get("need_match", 0.40)
     w_df = weights.get("difficulty_fit", 0.20)
     w_sp = weights.get("success_prob", 0.15)
     w_nv = weights.get("novelty", 0.10)
     w_qa = weights.get("quality", 0.10)
     w_rp = weights.get("repeat_penalty", 0.15)
+    w_wq = weights.get("wrong_question", 0.10)
+
+    from app.services.wrong_question_features import compute_wrong_question_boost
 
     items = []
     for problem in problems:
@@ -211,16 +215,19 @@ def rank_and_score(
         novelty = compute_novelty(problem, skill_profile)
         quality = float(problem.get("quality_score") or 0.8)
 
+        wq_boost = compute_wrong_question_boost(tags, wrong_question_ctx)
+
         total = (
             w_nm * need_match
             + w_df * diff_fit
             + w_sp * success_prob
             + w_nv * novelty
             + w_qa * quality
+            + w_wq * wq_boost
         )
 
         # repeat_penalty: 独立减分项，与设计文档公式一致
-        # score = w1·need + w2·diff + w3·P_success + w4·novelty + w5·q - w6·repeat_penalty
+        # score = w1·need + w2·diff + w3·P_success + w4·novelty + w5·q + w7·wq_boost - w6·repeat_penalty
         repeat_penalty = 0.0
         positive_adj = 0.0
         if feedback_adjustments and pid in feedback_adjustments:
@@ -244,6 +251,7 @@ def rank_and_score(
             "score_success_prob": round(success_prob, 4),
             "score_novelty": round(novelty, 4),
             "score_quality": round(quality, 4),
+            "score_wrong_question": round(wq_boost, 4),
             "repeat_penalty": round(repeat_penalty, 4),
         })
 
