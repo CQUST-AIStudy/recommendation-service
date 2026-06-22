@@ -7,6 +7,7 @@ build/
 .eggs/
 *.egg
 .env
+.env.docker
 .venv/
 venv/
 *.so

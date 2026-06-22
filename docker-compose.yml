@@ -1,0 +1,19 @@
+services:
+  recommendation-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: recommendation-service:latest
+    container_name: recommendation-service
+    env_file:
+      - ${APP_ENV_FILE:-.env.docker}
+    restart: unless-stopped
+    expose:
+      - "8003"
+    networks:
+      - cqust-ai-net
+
+networks:
+  cqust-ai-net:
+    name: ${DOCKER_NETWORK:-cqust-ai-net}
+    external: true

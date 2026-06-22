@@ -177,16 +177,21 @@ JSON 字段使用 camelCase（通过 Pydantic alias 自动转换）。
 
 ## 与 Java 后端对接
 
-Java 后端（`backend-repo`）通过 `RestTemplate` 调用本服务：
+Docker 部署后，Java 后端（`backend-repo`）和本服务应加入同一个 Docker 网络，例如 `cqust-ai-net`。Java 后端通过 Docker 服务名调用本服务：
 
 ```
-Java backend → http://127.0.0.1:8003/ai/profile/update
-Java backend → http://127.0.0.1:8003/ai/recommendation/generate
-Java backend → http://127.0.0.1:8003/ai/recommendation/result/{requestId}
-Java backend → http://127.0.0.1:8003/ai/recommendation/feedback
+Java backend → http://recommendation-service:8003/ai/profile/update
+Java backend → http://recommendation-service:8003/ai/recommendation/generate
+Java backend → http://recommendation-service:8003/ai/recommendation/result/{requestId}
+Java backend → http://recommendation-service:8003/ai/recommendation/feedback
+Java backend → http://recommendation-service:8003/webhook/spider-import
+Java backend → http://recommendation-service:8003/internal/refresh-student
+Java backend → http://recommendation-service:8003/internal/refresh-class
 ```
 
-**前端代理配置**（在 `frontend-repo/vue.config.js` 中添加）：
+本地开发时仍可使用 `http://127.0.0.1:8003`。
+
+**前端代理配置**（本地开发时在 `frontend-repo/vue.config.js` 中添加）：
 ```javascript
 '/recommend': {
   target: 'http://127.0.0.1:8003',
@@ -209,6 +214,11 @@ Java backend → http://127.0.0.1:8003/ai/recommendation/feedback
 
 ```
 recommendation-service/
+├── AGENTS.md                       # 项目协作与部署约定
+├── Dockerfile                      # 推荐服务容器镜像
+├── docker-compose.yml              # Docker 一键部署编排
+├── .dockerignore                   # Docker 构建上下文忽略规则
+├── .env.docker.example             # Docker 环境变量模板
 ├── pyproject.toml                  # uv 依赖管理
 ├── .env.example                    # 环境变量模板（含所有可配置参数）
 ├── README.md                       # 本文档
@@ -250,17 +260,53 @@ recommendation-service/
 
 ## 启动方式
 
-```bash
+### Docker 部署
+
+本仓库只编排推荐服务，MySQL、Java 后端、爬虫服务等已有服务需要加入同一个 Docker 网络。
+
+```powershell
+# 1. 创建同服务器服务互访网络（已存在会提示重复，可忽略）
+docker network create cqust-ai-net
+
+# 2. 复制 Docker 环境变量模板
+Copy-Item .env.docker.example .env.docker
+
+# 3. 编辑 .env.docker，填入真实数据库账号密码
+# DB_HOST 默认使用同网络内 MySQL 服务名 mysql
+
+# 4. 构建并启动
+docker compose up -d --build
+
+# 5. 查看状态
+docker compose ps
+```
+
+容器默认不发布宿主机端口，只暴露给同一 Docker 网络内的服务访问：
+
+```
+http://recommendation-service:8003/health
+http://recommendation-service:8003/docs
+```
+
+如果需要临时从宿主机直接调试，可在 `docker-compose.yml` 的服务下增加端口映射：
+
+```yaml
+ports:
+  - "8003:8003"
+```
+
+### 本地开发
+
+```powershell
 # 1. 安装依赖
-cd recommendation-service
-pip install -e ".[dev]"
+uv sync --extra dev
 
 # 2. 配置环境变量
-cp .env.example .env
+Copy-Item .env.example .env
 # 编辑 .env，填入数据库密码等
 
 # 3. 启动服务
-uvicorn app.main:app --host 0.0.0.0 --port 8003 --reload
+uv run uvicorn app.main:app --host 0.0.0.0 --port 8003 --reload
 
 # 4. 访问 API 文档
 # http://127.0.0.1:8003/docs
@@ -270,7 +316,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8003 --reload
 
 ## 参数配置
 
-所有参数均可在 `.env` 文件中覆盖，默认值与设计文档一致：
+所有参数均可在 `.env` 或 `.env.docker` 文件中覆盖，默认值与设计文档一致：
 
 | 配置组 | 关键参数 | 说明 |
 |--------|----------|------|
@@ -315,8 +361,8 @@ uvicorn app.main:app --host 0.0.0.0 --port 8003 --reload
 
 运行 `tests/test_algorithms.py` 验证全部 18 个测试用例：
 
-```bash
-python -m pytest tests/test_algorithms.py -v
+```powershell
+uv run pytest tests/test_algorithms.py -v
 ```
 
 覆盖范围：
