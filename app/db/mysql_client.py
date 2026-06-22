@@ -391,6 +391,36 @@ def find_student_by_id(student_id: int) -> dict[str, Any] | None:
         return cur.fetchone()
 
 
+def fetch_student_wrong_question_tags(student_no: str) -> list[dict[str, Any]]:
+    """错题本标签上下文 (used by ranking's wrong_question_boost factor).
+
+    Returns rows with problem_id, tags_cached, is_resolved for every wrong-question
+    notebook entry owned by this student.
+    """
+    if not student_no:
+        return []
+    with query() as cur:
+        cur.execute(
+            """SELECT problem_id, tags_cached, is_resolved
+               FROM wrong_question_notebook
+               WHERE student_no = %s""",
+            (student_no,),
+        )
+        return cur.fetchall()
+
+
+def fetch_student_wrong_question_tags_by_id(student_id: int) -> list[dict[str, Any]]:
+    """Same as fetch_student_wrong_question_tags but resolves student_no from
+    student_profile.id first. Used by the recommendation pipeline which works in
+    student_id space."""
+    if not student_id:
+        return []
+    profile = find_student_by_id(student_id)
+    if not profile or not profile.get("student_no"):
+        return []
+    return fetch_student_wrong_question_tags(profile["student_no"])
+
+
 def find_problem_attempts_for_student(student_id: int) -> list[dict[str, Any]]:
     """Get all problem attempts for a student from unified schema."""
     with query() as cur:

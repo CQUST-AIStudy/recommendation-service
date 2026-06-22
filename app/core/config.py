@@ -18,12 +18,13 @@ class Settings(BaseSettings):
     service_port: int = 8003
 
     # ── Recommendation weights ──
-    weight_need_match: float = 0.45
+    weight_need_match: float = 0.40
     weight_difficulty_fit: float = 0.20
     weight_success_prob: float = 0.15
     weight_novelty: float = 0.10
     weight_quality: float = 0.10
     weight_repeat_penalty: float = 0.15
+    weight_wrong_question: float = 0.10
 
     # ── BKT parameters (Corbett & Anderson 1995) ──
     bkt_p_transfer: float = 0.14

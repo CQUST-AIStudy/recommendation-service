@@ -156,6 +156,25 @@ def recall_by_popularity(limit: int) -> list[dict[str, Any]]:
     return db_mod.find_problems_page(0, limit)
 
 
+def recall_by_wrong_question_signals(student_id: int | None, limit: int) -> list[dict[str, Any]]:
+    """错题本召回:从学生未掌握错题的 tag 反向拉取同 tag 候选题.
+
+    Falls back to [] if the student has no unresolved wrong questions.
+    """
+    if not student_id or limit <= 0:
+        return []
+    try:
+        from app.services.wrong_question_features import load_wrong_question_context_by_id
+        ctx = load_wrong_question_context_by_id(student_id)
+        tags = list((ctx.get("unresolved_tag_counts") or {}).keys())
+        if not tags:
+            return []
+        return _find_by_tags(tags, limit)
+    except Exception as exc:
+        logger.warning("recall_by_wrong_question_signals failed for student %s: %s", student_id, exc)
+        return []
+
+
 def collect_candidates(
     skill_profile: list[dict[str, Any]],
     feedback_ctx: dict[str, Any] | None,
@@ -163,6 +182,8 @@ def collect_candidates(
     weak_ratio: float = 0.60,
     diff_ratio: float = 0.25,
     explore_ratio: float = 0.15,
+    student_id: int | None = None,
+    wrong_question_ratio: float = 0.20,
 ) -> dict[int, dict[str, Any]]:
     """
     多路召回合并去重。
@@ -175,6 +196,11 @@ def collect_candidates(
         反馈上下文，包含 completedProblemIds, dislikedProblemIds。
     limit : int
         期望推荐数量。
+    student_id : int | None
+        Optional. When provided, an additional recall source pulls problems
+        whose tags overlap with the student's unresolved wrong-question tags.
+    wrong_question_ratio : float
+        Share of `limit` reserved for the wrong-question recall source.
 
     Returns
     -------
@@ -192,6 +218,11 @@ def collect_candidates(
 
     for p in recall_by_exploration(skill_profile, max(1, int(limit * explore_ratio))):
         candidate_by_id.setdefault(p["id"], p)
+
+    # 错题本召回 (fifth source) — only adds when student_id is provided
+    if student_id and wrong_question_ratio > 0:
+        for p in recall_by_wrong_question_signals(student_id, max(1, int(limit * wrong_question_ratio))):
+            candidate_by_id.setdefault(p["id"], p)
 
     for p in recall_by_popularity(max(1, limit - len(candidate_by_id))):
         candidate_by_id.setdefault(p["id"], p)
