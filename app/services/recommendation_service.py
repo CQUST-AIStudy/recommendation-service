@@ -163,7 +163,14 @@ def _generate_recommendation_sync(student_id: int, limit: int, request_id: str) 
     items = []
     for i, scored in enumerate(reranked):
         problem = scored["problem"]
-        reason = generate_reason_text(problem, scored["score_need_match"], skill_profile)
+        pid = scored["problem_id"]
+        tags_for_problem = problem_tags_map.get(pid, [])
+        reason = generate_reason_text(
+            problem,
+            scored["score_need_match"],
+            skill_profile,
+            problem_tags=tags_for_problem,
+        )
 
         item = {
             "request_id": request_id,

@@ -267,6 +267,57 @@ def find_tags_for_problem(problem_id: int) -> list[dict[str, Any]]:
         return cur.fetchall()
 
 
+def find_problems_without_tags(limit: int = 500) -> list[dict[str, Any]]:
+    """返回 leetcode_problem_tag 表里没有标签的题(用于离线打标)。
+
+    SELECT 查的是题库里完全没被 tag 表收录过的题。
+    """
+    with query() as cur:
+        cur.execute(
+            """SELECT p.* FROM leetcode_problem_bank p
+            LEFT JOIN leetcode_problem_tag t ON t.problem_id = p.id
+            WHERE t.id IS NULL
+            ORDER BY p.id LIMIT %s""",
+            (limit,),
+        )
+        return cur.fetchall()
+
+
+def find_problem_tag_count(problem_id: int) -> int:
+    """统计某道题已有的 tag 数(用于判断是否需要补全)。"""
+    with query() as cur:
+        cur.execute(
+            "SELECT COUNT(*) AS n FROM leetcode_problem_tag WHERE problem_id = %s",
+            (problem_id,),
+        )
+        row = cur.fetchone()
+        return int(row["n"]) if row else 0
+
+
+def upsert_problem_tag(
+    problem_id: int,
+    tag_name: str,
+    tag_category: str,
+    relevance_score: float,
+    is_primary: bool,
+) -> None:
+    """插入或更新 leetcode_problem_tag 一行。
+
+    UK 是 (problem_id, tag_name),所以重复打标会触发 UPDATE 而不是报错。
+    """
+    with transaction() as cur:
+        cur.execute(
+            """INSERT INTO leetcode_problem_tag
+            (problem_id, tag_name, tag_category, relevance_score, is_primary)
+            VALUES (%s, %s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE
+                tag_category = VALUES(tag_category),
+                relevance_score = VALUES(relevance_score),
+                is_primary = VALUES(is_primary)""",
+            (problem_id, tag_name, tag_category, relevance_score, 1 if is_primary else 0),
+        )
+
+
 # ──────────────────────────────────────────
 # leetcode_recommend_request CRUD
 # ──────────────────────────────────────────
@@ -553,3 +604,53 @@ def upsert_pta_tag_mapping(mapping: dict[str, Any]) -> None:
                 relevance = VALUES(relevance)""",
             mapping,
         )
+
+
+# ──────────────────────────────────────────
+# leetcode_problem_embedding CRUD (方案 C)
+# ──────────────────────────────────────────
+
+def upsert_problem_embedding(problem_id: int, model_name: str, dim: int, blob: bytes) -> None:
+    """插入或更新题向量(方案 C 的离线脚本调用)。
+
+    表不存在时会抛 pymysql OperationalError,调用方负责表是否已建的判断。
+    """
+    with transaction() as cur:
+        cur.execute(
+            """INSERT INTO leetcode_problem_embedding
+            (problem_id, model_name, dim, embedding_blob)
+            VALUES (%s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE
+                dim = VALUES(dim),
+                embedding_blob = VALUES(embedding_blob),
+                updated_at = CURRENT_TIMESTAMP""",
+            (problem_id, model_name, dim, blob),
+        )
+
+
+def find_embedding_count() -> int:
+    """统计已编码的题向量数(用于判断方案 C 是否可用)。"""
+    try:
+        with query() as cur:
+            cur.execute("SELECT COUNT(*) AS n FROM leetcode_problem_embedding")
+            row = cur.fetchone()
+            return int(row["n"]) if row else 0
+    except Exception:
+        # 表不存在
+        return 0
+
+
+def find_problem_ids_with_embeddings(model_name: str | None = None) -> set[int]:
+    """返回已编码题的 ID 集合(用于离线脚本判断哪些题还没编码)。"""
+    try:
+        with query() as cur:
+            if model_name:
+                cur.execute(
+                    "SELECT problem_id FROM leetcode_problem_embedding WHERE model_name = %s",
+                    (model_name,),
+                )
+            else:
+                cur.execute("SELECT problem_id FROM leetcode_problem_embedding")
+            return {int(r["problem_id"]) for r in cur.fetchall()}
+    except Exception:
+        return set()

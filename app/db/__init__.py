@@ -11,6 +11,14 @@ from .mysql_client import (
     find_all_problems,
     find_problem_ids_by_tags,
     find_tags_for_problem,
+    # 方案 A:离线打标相关
+    find_problems_without_tags,
+    find_problem_tag_count,
+    upsert_problem_tag,
+    # 方案 C:embedding 相关
+    upsert_problem_embedding,
+    find_embedding_count,
+    find_problem_ids_with_embeddings,
     create_request,
     get_request,
     complete_request,

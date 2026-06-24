@@ -4,6 +4,10 @@
 排序公式:
 score = w1·need_match + w2·difficulty_fit + w3·P_success + w4·novelty
       + w5·quality - w6·repeat_penalty
+
+匹配机制升级 (方案 A):
+  - 旧版的 _TAG_MAP 和 _COURSE_WEIGHTS 改为从 knowledge_tags 模块取(50+ 项)
+  - 文本回退用 tag_relevance_score 打分,带相关性加权,而不是 bool 命中
 """
 from __future__ import annotations
 
@@ -12,28 +16,13 @@ import math
 import random
 from typing import Any
 
+from app.services.knowledge_tags import (
+    get_course_weight,
+    get_english_synonyms,
+    tag_relevance_score,
+)
+
 logger = logging.getLogger(__name__)
-
-# 中英文标签映射（同 recall.py）
-_TAG_MAP: dict[str, str] = {
-    "动态规划": "dynamic programming", "贪心": "greedy", "回溯": "backtrack",
-    "图": "graph", "树": "tree", "堆": "heap", "并查集": "union find",
-    "位运算": "bit manipulation", "数组": "array", "字符串": "string",
-    "链表": "linked list", "哈希表": "hash", "栈": "stack", "队列": "queue",
-    "排序": "sort", "二分查找": "binary search",
-}
-
-# 课程重点权重 w_course（高权重 = 课程重点知识点）
-_COURSE_WEIGHTS: dict[str, float] = {
-    "数组": 0.8, "链表": 0.9, "栈": 0.8, "队列": 0.8,
-    "树": 0.9, "图": 0.7, "字符串": 0.7, "动态规划": 0.6,
-    "贪心": 0.6, "回溯": 0.6, "排序": 0.8, "二分查找": 0.7,
-    "哈希表": 0.7, "堆": 0.6, "并查集": 0.4, "位运算": 0.4,
-}
-
-
-def _get_course_weight(tag: str) -> float:
-    return _COURSE_WEIGHTS.get(tag, 0.5)
 
 
 def _build_text(problem: dict[str, Any]) -> str:
@@ -41,10 +30,6 @@ def _build_text(problem: dict[str, Any]) -> str:
     text = problem.get("problem_text", "") or ""
     solution = problem.get("solution_text", "") or ""
     return (title + " " + text + " " + solution).lower()
-
-
-def _get_english_tag(chinese: str) -> str:
-    return _TAG_MAP.get(chinese, chinese)
 
 
 # ──────────────────────────────────────────
@@ -64,7 +49,7 @@ def compute_need(mastery_norm: float, forgetting_norm: float, tag: str) -> float
     tag : str
         技能标签名。
     """
-    return 0.75 * (1.0 - mastery_norm) + 0.10 * forgetting_norm + 0.15 * _get_course_weight(tag)
+    return 0.75 * (1.0 - mastery_norm) + 0.10 * forgetting_norm + 0.15 * get_course_weight(tag)
 
 
 def compute_need_match(
@@ -74,38 +59,41 @@ def compute_need_match(
 ) -> float:
     """
     题目匹配度 = Σ need(tag_i)·r_i / Σ r_i
+
+    r_i = tag 表里的 relevance_score(方案 A 之后是真实相关度,不再是固定 1.0)。
+    tag 表缺失时回退到 knowledge_tags.tag_relevance_score 在线打分。
     """
-    ptext = _build_text(problem)
+    title = problem.get("title_main", "") or ""
+    body = (problem.get("problem_text", "") or "") + " " + (problem.get("solution_text", "") or "")
     profile_map = {s.get("tag_name"): s for s in skill_profile}
 
     total_need = 0.0
     total_relevance = 0.0
 
-    # 先用 tag 表数据
+    # 第一优先级:tag 表数据 (relevance_score 已经是方案 A 离线打标后的真实分数)
     if problem_tags:
         for pt in problem_tags:
             tag = pt.get("tag_name", "")
-            relevance = pt.get("relevance_score", 1.0) or 1.0
+            relevance = float(pt.get("relevance_score") or 0)
             state = profile_map.get(tag)
-            if state:
+            if state and relevance > 0:
                 m_norm = (state.get("mastery_score") or 50) / 100.0
                 f_norm = (state.get("forgetting_score") or 0) / 100.0
                 total_need += compute_need(m_norm, f_norm, tag) * relevance
                 total_relevance += relevance
 
-    # 如果 tag 表没数据，回退文本匹配
+    # 第二优先级:tag 表缺失或全 0,在线打分
     if total_relevance < 0.01:
         for state in skill_profile:
             tag = state.get("tag_name", "")
             if not tag:
                 continue
-            tag_lower = tag.lower()
-            eng = _get_english_tag(tag).lower()
-            if (tag_lower and tag_lower in ptext) or (eng and eng in ptext):
+            relevance = tag_relevance_score(title, body, tag)
+            if relevance >= 0.5:
                 m_norm = (state.get("mastery_score") or 50) / 100.0
                 f_norm = (state.get("forgetting_score") or 0) / 100.0
-                total_need += compute_need(m_norm, f_norm, tag)
-                total_relevance += 1.0
+                total_need += compute_need(m_norm, f_norm, tag) * relevance
+                total_relevance += relevance
 
     if total_relevance < 0.01:
         return 0.3  # 无匹配时给默认值
@@ -126,47 +114,52 @@ def compute_difficulty_fit(problem: dict[str, Any], avg_mastery: float) -> float
 
 def compute_success_prob(problem: dict[str, Any], skill_profile: list[dict[str, Any]]) -> float:
     """
-    通过概率估计（按掌握度映射，无数据回退 0.60）。
+    通过概率估计(按掌握度映射,无数据回退 0.60)。
+    相关 tag 识别走 knowledge_tags.tag_relevance_score,带分数加权。
     """
     if not skill_profile:
         return 0.6
 
-    ptext = _build_text(problem)
-    profile_map = {s.get("tag_name"): s for s in skill_profile}
+    title = problem.get("title_main", "") or ""
+    body = (problem.get("problem_text", "") or "") + " " + (problem.get("solution_text", "") or "")
 
-    related_mastery = []
+    weighted_mastery = 0.0
+    total_w = 0.0
     for state in skill_profile:
         tag = state.get("tag_name", "")
-        tag_lower = tag.lower()
-        eng = _get_english_tag(tag).lower()
-        if (tag_lower and tag_lower in ptext) or (eng and eng in ptext):
-            related_mastery.append((state.get("mastery_score") or 50) / 100.0)
+        if not tag:
+            continue
+        w = tag_relevance_score(title, body, tag)
+        if w >= 0.5:
+            weighted_mastery += w * ((state.get("mastery_score") or 50) / 100.0)
+            total_w += w
 
-    if not related_mastery:
+    if total_w < 0.01:
         return 0.6
 
-    avg_mastery = sum(related_mastery) / len(related_mastery)
-    # 简单映射: 掌握度 -> 通过概率
+    avg_mastery = weighted_mastery / total_w
     return min(0.95, avg_mastery * 0.85 + 0.15)
 
 
 def compute_novelty(problem: dict[str, Any], skill_profile: list[dict[str, Any]]) -> float:
-    """新颖度: 练习次数越少越新颖。"""
-    ptext = _build_text(problem)
-    total_attempts = 0
-    matched = 0
+    """新颖度: 练习次数越少越新颖。相关 tag 识别走 knowledge_tags.tag_relevance_score。"""
+    title = problem.get("title_main", "") or ""
+    body = (problem.get("problem_text", "") or "") + " " + (problem.get("solution_text", "") or "")
 
+    weighted_attempts = 0.0
+    total_w = 0.0
     for state in skill_profile:
         tag = state.get("tag_name", "")
-        tag_lower = tag.lower()
-        eng = _get_english_tag(tag).lower()
-        if (tag_lower and tag_lower in ptext) or (eng and eng in ptext):
-            total_attempts += state.get("attempt_count") or 0
-            matched += 1
+        if not tag:
+            continue
+        w = tag_relevance_score(title, body, tag)
+        if w >= 0.5:
+            weighted_attempts += w * (state.get("attempt_count") or 0)
+            total_w += w
 
-    if matched == 0:
+    if total_w < 0.01:
         return 1.0
-    avg = total_attempts / matched
+    avg = weighted_attempts / total_w
     return max(0.1, 1.0 - avg / 10.0)
 
 
@@ -329,41 +322,79 @@ def generate_reason_text(
     problem: dict[str, Any],
     need_match: float,
     skill_profile: list[dict[str, Any]],
+    problem_tags: list[dict[str, Any]] | None = None,
 ) -> str:
-    """生成可解释推荐理由。"""
+    """
+    生成可解释推荐理由。
+
+    升级后能说清楚三件事(答辩弹药):
+      1. 这题考的是什么知识点(主标签 + 相关度)
+      2. 为什么推给你(你在该知识点掌握度低)
+      3. 难度是否合适(目标难度 vs 题目难度)
+    """
     parts: list[str] = []
 
-    # 找出最薄弱的匹配技能
-    ptext = _build_text(problem)
+    title = problem.get("title_main", "") or ""
+    body = (problem.get("problem_text", "") or "") + " " + (problem.get("solution_text", "") or "")
+
+    # ---- Step 1: 找主标签 + 相关度 ----
+    primary_tag = None
+    primary_relevance = 0.0
+    if problem_tags:
+        # 按 relevance_score 降序、优先 is_primary
+        sorted_tags = sorted(
+            problem_tags,
+            key=lambda t: (int(t.get("is_primary") or 0), float(t.get("relevance_score") or 0)),
+            reverse=True,
+        )
+        if sorted_tags:
+            primary_tag = sorted_tags[0].get("tag_name")
+            primary_relevance = float(sorted_tags[0].get("relevance_score") or 0)
+
+    # 如果 tag 表没数据,在线算一遍主标签
+    if not primary_tag:
+        from app.services.knowledge_tags import detect_tags_for_problem
+        detected = detect_tags_for_problem(title, body, min_score=0.5, max_tags=1)
+        if detected:
+            primary_tag, primary_relevance, _ = detected[0]
+
+    # ---- Step 2: 该标签在学生画像里的掌握度 ----
     profile_map = {s.get("tag_name"): s for s in skill_profile}
+    state = profile_map.get(primary_tag) if primary_tag else None
 
-    weakest_tag = None
-    weakest_mastery = 100.0
-    for state in skill_profile:
-        tag = state.get("tag_name", "")
-        if not tag:
-            continue
-        tag_lower = tag.lower()
-        eng = _get_english_tag(tag).lower()
-        if (tag_lower and tag_lower in ptext) or (eng and eng in ptext):
-            m = state.get("mastery_score") or 50
-            if m < weakest_mastery:
-                weakest_mastery = m
-                weakest_tag = tag
+    # ---- Step 3: 组装理由 ----
+    if primary_tag and primary_relevance >= 0.5:
+        tag_part = f"本题主要考查「{primary_tag}」"
+        if primary_relevance < 1.0:
+            tag_part += f"(相关度 {primary_relevance:.2f})"
+        parts.append(tag_part + "。")
+    elif primary_tag:
+        parts.append(f"本题涉及「{primary_tag}」。")
 
-    if weakest_tag and need_match > 0.5:
-        parts.append(f"针对你的薄弱技能「{weakest_tag}」（掌握度 {weakest_mastery:.1f}%）进行强化练习。")
+    if state and primary_tag:
+        mastery = float(state.get("mastery_score") or 50)
+        attempts = int(state.get("attempt_count") or 0)
+        if mastery < 40:
+            parts.append(f"你在该知识点掌握度 {mastery:.1f}%,属于薄弱项,建议优先突破。")
+        elif mastery < 70:
+            parts.append(f"你在该知识点掌握度 {mastery:.1f}%,仍需巩固。")
+        else:
+            parts.append(f"你在该知识点掌握度 {mastery:.1f}%,可作为提升训练。")
+        if attempts > 0:
+            parts.append(f"历史练习 {attempts} 次。")
 
+    # 难度说明
     difficulty = (problem.get("difficulty") or "Medium").lower()
+    diff_desc = {"easy": "基础", "medium": "进阶", "hard": "挑战"}.get(difficulty, "适中")
     if difficulty == "easy":
-        parts.append("适合基础巩固，建议先掌握基本思路。")
+        parts.append("难度较低,适合基础巩固。")
     elif difficulty == "medium":
-        parts.append("中等难度，适合提升解题能力。")
+        parts.append("中等难度,适合能力提升。")
     elif difficulty == "hard":
-        parts.append("高难度挑战，有助于突破技能瓶颈。")
+        parts.append("高难度,有助于突破瓶颈。")
 
     est = problem.get("estimated_minutes")
     if est:
         parts.append(f"预计用时 {est} 分钟。")
 
-    return "".join(parts) if parts else "系统推荐的优质题目，适合当前学习阶段。"
+    return "".join(parts) if parts else "系统根据你的画像推荐的优质题目,适合当前学习阶段。"
