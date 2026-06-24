@@ -25,6 +25,20 @@ from app.services.knowledge_tags import (
 logger = logging.getLogger(__name__)
 
 
+def _num(value: Any, default: float = 0.0) -> float:
+    """把 DB 返回的 Decimal/int/float/None 统一转 float。
+
+    MySQL 的 DECIMAL 列在 PyMySQL 里返回 decimal.Decimal,
+    直接和 Python float 做运算会抛 TypeError,所以必须显式转。
+    """
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _build_text(problem: dict[str, Any]) -> str:
     title = problem.get("title_main", "") or ""
     text = problem.get("problem_text", "") or ""
@@ -74,11 +88,11 @@ def compute_need_match(
     if problem_tags:
         for pt in problem_tags:
             tag = pt.get("tag_name", "")
-            relevance = float(pt.get("relevance_score") or 0)
+            relevance = _num(pt.get("relevance_score"), 0.0)
             state = profile_map.get(tag)
             if state and relevance > 0:
-                m_norm = (state.get("mastery_score") or 50) / 100.0
-                f_norm = (state.get("forgetting_score") or 0) / 100.0
+                m_norm = _num(state.get("mastery_score"), 50.0) / 100.0
+                f_norm = _num(state.get("forgetting_score"), 0.0) / 100.0
                 total_need += compute_need(m_norm, f_norm, tag) * relevance
                 total_relevance += relevance
 
@@ -90,8 +104,8 @@ def compute_need_match(
                 continue
             relevance = tag_relevance_score(title, body, tag)
             if relevance >= 0.5:
-                m_norm = (state.get("mastery_score") or 50) / 100.0
-                f_norm = (state.get("forgetting_score") or 0) / 100.0
+                m_norm = _num(state.get("mastery_score"), 50.0) / 100.0
+                f_norm = _num(state.get("forgetting_score"), 0.0) / 100.0
                 total_need += compute_need(m_norm, f_norm, tag) * relevance
                 total_relevance += relevance
 
@@ -131,7 +145,7 @@ def compute_success_prob(problem: dict[str, Any], skill_profile: list[dict[str, 
             continue
         w = tag_relevance_score(title, body, tag)
         if w >= 0.5:
-            weighted_mastery += w * ((state.get("mastery_score") or 50) / 100.0)
+            weighted_mastery += w * (_num(state.get("mastery_score"), 50.0) / 100.0)
             total_w += w
 
     if total_w < 0.01:
@@ -183,7 +197,7 @@ def rank_and_score(
     if not skill_profile:
         avg_mastery = 50.0
     else:
-        avg_mastery = sum(s.get("mastery_score") or 50 for s in skill_profile) / len(skill_profile)
+        avg_mastery = sum(_num(s.get("mastery_score"), 50.0) for s in skill_profile) / len(skill_profile)
 
     w_nm = weights.get("need_match", 0.40)
     w_df = weights.get("difficulty_fit", 0.20)
@@ -372,8 +386,8 @@ def generate_reason_text(
         parts.append(f"本题涉及「{primary_tag}」。")
 
     if state and primary_tag:
-        mastery = float(state.get("mastery_score") or 50)
-        attempts = int(state.get("attempt_count") or 0)
+        mastery = _num(state.get("mastery_score"), 50.0)
+        attempts = int(_num(state.get("attempt_count"), 0))
         if mastery < 40:
             parts.append(f"你在该知识点掌握度 {mastery:.1f}%,属于薄弱项,建议优先突破。")
         elif mastery < 70:

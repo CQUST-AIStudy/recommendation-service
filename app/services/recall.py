@@ -22,6 +22,17 @@ from app.services.knowledge_tags import tag_relevance_score
 
 logger = logging.getLogger(__name__)
 
+
+def _num(value: Any, default: float = 0.0) -> float:
+    """DB Decimal/int/float → float(MySQL DECIMAL 列必须显式转才能和 float 运算)。"""
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 # tag_category 枚举(对齐 DB schema)
 _TAG_CATEGORIES = ("algorithm", "data_structure", "technique")
 
@@ -98,8 +109,8 @@ def recall_by_weakness(skill_profile: list[dict[str, Any]], limit: int) -> list[
     弱项标签召回：找掌握度最低的5个标签，按标签查题。
     """
     weak = sorted(
-        [s for s in skill_profile if (s.get("mastery_score") or 50) < 60],
-        key=lambda s: s.get("mastery_score") or 50,
+        [s for s in skill_profile if _num(s.get("mastery_score"), 50.0) < 60],
+        key=lambda s: _num(s.get("mastery_score"), 50.0),
     )[:5]
     tags = [s["tag_name"] for s in weak if s.get("tag_name")]
 
@@ -107,7 +118,7 @@ def recall_by_weakness(skill_profile: list[dict[str, Any]], limit: int) -> list[
         # 全部都 >= 60，则取练习次数最少的
         tags = [
             s["tag_name"]
-            for s in sorted(skill_profile, key=lambda s: s.get("attempt_count") or 0)[:3]
+            for s in sorted(skill_profile, key=lambda s: _num(s.get("attempt_count"), 0))[:3]
             if s.get("tag_name")
         ]
 
@@ -121,7 +132,7 @@ def recall_by_difficulty(skill_profile: list[dict[str, Any]], limit: int) -> lis
     if not skill_profile:
         return db_mod.find_problems_page(0, limit)
 
-    avg = sum(s.get("mastery_score") or 50 for s in skill_profile) / len(skill_profile)
+    avg = sum(_num(s.get("mastery_score"), 50.0) for s in skill_profile) / len(skill_profile)
     target = "Easy" if avg < 40 else ("Medium" if avg < 70 else "Hard")
 
     problems = db_mod.find_problems_by_difficulty(target, limit)

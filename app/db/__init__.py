@@ -19,6 +19,17 @@ from .mysql_client import (
     upsert_problem_embedding,
     find_embedding_count,
     find_problem_ids_with_embeddings,
+    # 错题本上下文(原有函数,re-export 补全)
+    fetch_student_wrong_question_tags,
+    fetch_student_wrong_question_tags_by_id,
+    # 学生/班级查询(原有函数,re-export 补全,review round 1 发现)
+    find_student_by_id,
+    find_student_by_student_no,
+    find_students_by_class,
+    # 练习记录查询(原有函数,re-export 补全)
+    find_problem_attempts_for_student,
+    find_legacy_submit_situation,
+    find_pta_tag_mappings,
     create_request,
     get_request,
     complete_request,

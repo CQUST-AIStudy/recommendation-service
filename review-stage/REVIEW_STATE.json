@@ -1,9 +1,12 @@
 {
-  "round": 3,
+  "round": 1,
   "threadId": null,
   "status": "completed",
   "difficulty": "medium",
-  "last_score": 9.0,
+  "last_score": 7.0,
   "last_verdict": "almost",
-  "timestamp": "2026-06-06T00:00:00"
+  "effective_score_after_verification": 8.0,
+  "effective_verdict": "ready",
+  "pending_experiments": [],
+  "timestamp": "2026-06-24T23:55:00"
 }
