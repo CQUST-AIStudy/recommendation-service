@@ -8,8 +8,10 @@ services:
     env_file:
       - ${APP_ENV_FILE:-.env.docker}
     restart: unless-stopped
-    expose:
-      - "8003"
+    ports:
+      - "${RECOMMENDATION_HOST_PORT:-8003}:8003"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     networks:
       - cqust-ai-net
 

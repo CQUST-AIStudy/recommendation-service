@@ -272,7 +272,7 @@ docker network create cqust-ai-net
 Copy-Item .env.docker.example .env.docker
 
 # 3. 编辑 .env.docker，填入真实数据库账号密码
-# DB_HOST 默认使用同网络内 MySQL 服务名 mysql
+# DB_HOST 默认使用 host.docker.internal；远程库可直接填写域名或 IP
 
 # 4. 构建并启动
 docker compose up -d --build
@@ -281,18 +281,12 @@ docker compose up -d --build
 docker compose ps
 ```
 
-容器默认不发布宿主机端口，只暴露给同一 Docker 网络内的服务访问：
+容器默认发布宿主机 `8003` 端口，也加入 `cqust-ai-net` 供同一 Docker 网络内的服务访问：
 
 ```
+http://127.0.0.1:8003/health
 http://recommendation-service:8003/health
 http://recommendation-service:8003/docs
-```
-
-如果需要临时从宿主机直接调试，可在 `docker-compose.yml` 的服务下增加端口映射：
-
-```yaml
-ports:
-  - "8003:8003"
 ```
 
 ### 本地开发
