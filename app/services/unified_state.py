@@ -3,9 +3,9 @@ Unified Knowledge State — P(recall) = P(L) × R(t)
 
 将 BKT 掌握概率与遗忘保留率统一为单一回忆概率。
 
-Reference: Lindsey, R. V., et al. (2014).
-"Improving Students' Long-Term Knowledge Retention via Spaced Repetition
-in a Practice-Based Learning System". CHI '14. (DAS3H model)
+Reference: Lindsey, R. V., Shroyer, J. D., Pashler, H., & Mozer, M. C. (2014).
+"Improving Students' Long-Term Knowledge Retention Through Personalized Review".
+Psychological Science, 25(3), 639-647. (后续 DAS3H 模型见 Choffin et al., 2019, EDM)
 """
 from __future__ import annotations
 

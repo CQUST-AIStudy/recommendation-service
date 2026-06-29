@@ -4,7 +4,7 @@ Ebbinghaus Forgetting Curve + SM-2 Stability Model — 遗忘度计算
 Reference:
 - Ebbinghaus, H. (1885/1964). "Memory: A Contribution to Experimental Psychology".
 - SuperMemo SM-2 algorithm heuristics (P. A. Wozniak, 1997).
-- Lindsey, R. V., et al. (2014). DAS3H model. CHI '14.
+- Lindsey, R. V., Shroyer, J. D., Pashler, H., & Mozer, M. C. (2014). "Improving Students' Long-Term Knowledge Retention Through Personalized Review". Psychological Science, 25(3), 639-647.
 """
 from __future__ import annotations
 

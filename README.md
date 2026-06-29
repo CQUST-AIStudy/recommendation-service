@@ -562,7 +562,7 @@ SELECT model_name, COUNT(*) AS n FROM leetcode_problem_embedding GROUP BY model_
 |------|------|
 | BKT | Corbett, A. T., & Anderson, J. R. (1995). "Knowledge Tracing". *UMUAI*, 4(4), 253-278. |
 | 遗忘曲线 | Ebbinghaus, H. (1885). "Memory: A Contribution to Experimental Psychology". |
-| BKT+遗忘混合 | Lindsey, R. V., et al. (2014). DAS3H model. *CHI '14*. |
+| BKT+遗忘混合 | Lindsey, R. V., Shroyer, J. D., Pashler, H., & Mozer, M. C. (2014). "Improving Students' Long-Term Knowledge Retention Through Personalized Review"（MCM 遗忘模型驱动的个性化复习调度）. *Psychological Science*, 25(3), 639–647. |
 | 时间感知KT | Upadhyay, S., et al. (2021). "Robust Knowledge Tracing". *L@S '21*. |
 | 置信区间 | Wilson, E. B. (1927). *JASA*, 22(158), 209-212. |
 | SM-2 | Wozniak, P. A. (1997). "SuperMemo: Theoretical Background". |
