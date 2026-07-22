@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     weight_quality: float = 0.10
     weight_repeat_penalty: float = 0.15
     weight_wrong_question: float = 0.10
+    weight_pta_error: float = 0.12
 
     # ── BKT parameters (Corbett & Anderson 1995) ──
     bkt_p_transfer: float = 0.14

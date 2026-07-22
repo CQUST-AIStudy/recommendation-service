@@ -188,9 +188,10 @@ def rank_and_score(
     weights: dict[str, float],
     problem_tags_map: dict[int, list[dict[str, Any]]] | None = None,
     wrong_question_ctx: dict[str, Any] | None = None,
+    pta_error_ctx: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """
-    六因子加权排序 + 错题本加权 (seventh factor).
+    六因子加权排序 + 错题本加权 + PTA高频错题加权.
 
     Returns list of dicts with scores.
     """
@@ -206,8 +207,9 @@ def rank_and_score(
     w_qa = weights.get("quality", 0.10)
     w_rp = weights.get("repeat_penalty", 0.15)
     w_wq = weights.get("wrong_question", 0.10)
+    w_pta = weights.get("pta_error", 0.12)
 
-    from app.services.wrong_question_features import compute_wrong_question_boost
+    from app.services.wrong_question_features import compute_wrong_question_boost, compute_pta_error_boost
 
     items = []
     for problem in problems:
@@ -223,6 +225,7 @@ def rank_and_score(
         quality = float(problem.get("quality_score") or 0.8)
 
         wq_boost = compute_wrong_question_boost(tags, wrong_question_ctx)
+        pta_boost = compute_pta_error_boost(tags, pta_error_ctx)
 
         total = (
             w_nm * need_match
@@ -231,6 +234,7 @@ def rank_and_score(
             + w_nv * novelty
             + w_qa * quality
             + w_wq * wq_boost
+            + w_pta * pta_boost
         )
 
         # repeat_penalty: 独立减分项，与设计文档公式一致
@@ -259,6 +263,7 @@ def rank_and_score(
             "score_novelty": round(novelty, 4),
             "score_quality": round(quality, 4),
             "score_wrong_question": round(wq_boost, 4),
+            "score_pta_error": round(pta_boost, 4),
             "repeat_penalty": round(repeat_penalty, 4),
         })
 

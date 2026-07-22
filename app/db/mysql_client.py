@@ -501,6 +501,48 @@ def find_problem_states_for_student(student_id: int) -> list[dict[str, Any]]:
         return cur.fetchall()
 
 
+def find_pta_high_frequency_errors(
+    student_id: int, min_errors: int = 5
+) -> list[dict[str, Any]]:
+    """返回 PTA 题目中累计错误次数 ≥ min_errors 的高频错题。
+
+    直接在 student_problem_attempt 上按 (student_id, offering_id, problem_id) 分组，
+    统计 judge_status 为非 AC 的提交次数，过滤 >= min_errors 的题目。
+    """
+    accepted_statuses = (
+        "AC", "ACCEPTED", "CORRECT", "PASS", "100",
+        "满分", "成功", "通过", "PASSED", "答案正确",
+    )
+    placeholders = ",".join(["%s"] * len(accepted_statuses))
+    with query() as cur:
+        cur.execute(
+            f"""SELECT
+                 spa.student_id,
+                 spa.offering_id,
+                 spa.problem_id,
+                 COUNT(*) AS attempt_count,
+                 SUM(CASE WHEN UPPER(TRIM(COALESCE(spa.judge_status, '')))
+                      IN ({placeholders}) THEN 1 ELSE 0 END) AS accepted_count,
+                 SUM(CASE WHEN UPPER(TRIM(COALESCE(spa.judge_status, '')))
+                      IN ({placeholders}) THEN 0 ELSE 1 END) AS error_count,
+                 ap.title AS problem_title,
+                 ap.source_problem_id,
+                 ao.title_override AS offering_title
+               FROM student_problem_attempt spa
+               LEFT JOIN assignment_problem ap
+                 ON spa.problem_id = ap.id AND spa.offering_id = ap.offering_id
+               LEFT JOIN assignment_offering ao ON spa.offering_id = ao.id
+               WHERE spa.student_id = %s
+               GROUP BY spa.student_id, spa.offering_id, spa.problem_id,
+                        ap.title, ap.source_problem_id, ao.title_override
+               HAVING error_count >= %s
+               ORDER BY error_count DESC
+               LIMIT 50""",
+            (*accepted_statuses, *accepted_statuses, student_id, min_errors),
+        )
+        return cur.fetchall()
+
+
 def find_assignments_for_student(student_id: int) -> list[dict[str, Any]]:
     """Get assignment records for a student."""
     with query() as cur:

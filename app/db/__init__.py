@@ -28,6 +28,7 @@ from .mysql_client import (
     find_students_by_class,
     # 练习记录查询(原有函数,re-export 补全)
     find_problem_attempts_for_student,
+    find_pta_high_frequency_errors,
     find_legacy_submit_situation,
     find_pta_tag_mappings,
     create_request,

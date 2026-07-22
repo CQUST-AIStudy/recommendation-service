@@ -63,6 +63,7 @@ def _get_weights() -> dict[str, float]:
         "quality": s.weight_quality,
         "repeat_penalty": s.weight_repeat_penalty,
         "wrong_question": s.weight_wrong_question,
+        "pta_error": s.weight_pta_error,
     }
 
 
@@ -108,6 +109,7 @@ def _generate_recommendation_sync(student_id: int, limit: int, request_id: str) 
 
     from app.services.wrong_question_features import (
         load_wrong_question_context_by_id,
+        load_pta_error_context,
         reset_cache_for_request,
     )
     # Each recommendation request gets a fresh wrong-question snapshot so we
@@ -118,6 +120,12 @@ def _generate_recommendation_sync(student_id: int, limit: int, request_id: str) 
     except Exception as exc:
         logger.warning("Failed to load wrong-question context for student %s: %s", student_id, exc)
         wrong_question_ctx = None
+
+    try:
+        pta_error_ctx = load_pta_error_context(student_id, min_errors=5)
+    except Exception as exc:
+        logger.warning("Failed to load PTA error context (will continue without PTA boost): %s", exc, exc_info=True)
+        pta_error_ctx = None
 
     # Step 3: 多路召回 (含错题本召回源)
     candidates = collect_candidates(
@@ -151,6 +159,7 @@ def _generate_recommendation_sync(student_id: int, limit: int, request_id: str) 
         weights,
         problem_tags_map,
         wrong_question_ctx,
+        pta_error_ctx,
     )
 
     # Step 5: 多样性重排

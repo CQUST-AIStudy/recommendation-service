@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
 
 from app import db as db_mod
 from app.core.responses import ApiError, api_success
@@ -266,3 +266,26 @@ def generate_recommendation_sync(request: SyncRequest):
     except Exception as e:
         logger.error("Sync recommendation failed: %s", e, exc_info=True)
         raise ApiError(500, f"Sync recommendation failed: {e}") from e
+
+
+@router.get("/pta-errors")
+def get_pta_high_frequency_errors(student_no: str = Query(..., min_length=1), min_errors: int = 5):
+    """返回某个学生 PTA 累计错误 ≥ min_errors 的高频错题列表。
+
+    本接口按学号（student_no）查询，内部自动解析为 student_profile.id 后查询提交记录。
+    调用方（Java 网关）应从登录会话获取当前学生的学号，不得由学生客户端指定他人学号。
+    """
+    try:
+        from app.services.wrong_question_features import load_pta_error_context_by_no
+        ctx = load_pta_error_context_by_no(student_no, min_errors)
+        return api_success({
+            "student_no": student_no,
+            "min_errors": min_errors,
+            "total_count": len(ctx.get("pta_items", [])),
+            "items": ctx.get("pta_items", []),
+        })
+    except ApiError:
+        raise
+    except Exception as e:
+        logger.error("PTA error query failed: %s", e, exc_info=True)
+        raise ApiError(500, f"PTA error query failed: {e}") from e
