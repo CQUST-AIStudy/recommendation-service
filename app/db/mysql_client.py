@@ -6,7 +6,6 @@ from __future__ import annotations
 import logging
 import threading
 from contextlib import contextmanager
-from datetime import datetime
 from queue import Empty, Full, Queue
 from typing import Any, Generator
 
@@ -526,15 +525,27 @@ def find_pta_high_frequency_errors(
                  SUM(CASE WHEN UPPER(TRIM(COALESCE(spa.judge_status, '')))
                       IN ({placeholders}) THEN 0 ELSE 1 END) AS error_count,
                  ap.title AS problem_title,
+                 ap.problem_no,
                  ap.source_problem_id,
-                 ao.title_override AS offering_title
+                 ao.title_override AS offering_title,
+                 ao.pta_problem_set_id,
+                 MAX(apd.knowledge_leaf) AS knowledge_point,
+                 MAX(apd.knowledge_path) AS knowledge_path,
+                 MAX(apd.difficulty_label) AS difficulty_label
                FROM student_problem_attempt spa
                LEFT JOIN assignment_problem ap
                  ON spa.problem_id = ap.id AND spa.offering_id = ap.offering_id
                LEFT JOIN assignment_offering ao ON spa.offering_id = ao.id
+               LEFT JOIN pta_problem_detail apd
+                 ON apd.problem_set_problem_id = ap.problem_no
+                AND (
+                  ao.source_offering_key = CONCAT('LEGACY_EXPERIMENT_OFFERING:', apd.experiment_id)
+                  OR (ao.pta_problem_set_id IS NOT NULL AND apd.problem_set_id = ao.pta_problem_set_id)
+                )
                WHERE spa.student_id = %s
                GROUP BY spa.student_id, spa.offering_id, spa.problem_id,
-                        ap.title, ap.source_problem_id, ao.title_override
+                         ap.title, ap.problem_no, ap.source_problem_id,
+                         ao.title_override, ao.pta_problem_set_id
                HAVING error_count >= %s
                ORDER BY error_count DESC
                LIMIT 50""",

@@ -85,9 +85,14 @@ def load_pta_error_context(student_id: int, min_errors: int = 5) -> dict[str, An
             "problem_id": problem_id,
             "error_count": error_count,
             "problem_title": r.get("problem_title", ""),
+            "problem_no": r.get("problem_no"),
             "source_problem_id": r.get("source_problem_id"),
             "offering_id": r.get("offering_id"),
             "offering_title": r.get("offering_title", ""),
+            "pta_problem_set_id": r.get("pta_problem_set_id"),
+            "knowledge_point": r.get("knowledge_point", ""),
+            "knowledge_path": r.get("knowledge_path", ""),
+            "difficulty_label": r.get("difficulty_label", ""),
         })
 
     ctx = {
