@@ -11,13 +11,10 @@ PTA 数据摄取服务 — 从 spider-repo 爬取的 PTA 数据中提取学生�
 from __future__ import annotations
 
 import logging
-import re
 from collections import defaultdict
 from typing import Any
 
 from app import db as db_mod
-from app.core.config import get_settings
-from .unified_state import UnifiedStateEngine
 
 logger = logging.getLogger(__name__)
 
@@ -221,8 +218,6 @@ def _process_unified_attempts(
     tag_map: dict[str, list[tuple[str, float]]],
 ) -> dict[str, Any]:
     """处理 unified schema 的提交记录。"""
-    settings = get_settings()
-
     # 按 tag 聚合统计
     tag_stats: dict[str, dict[str, Any]] = defaultdict(
         lambda: {"attempts": 0, "successes": 0, "last_correct_at": None}

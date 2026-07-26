@@ -134,7 +134,7 @@ score = 0.45·need_match + 0.20·difficulty_fit + 0.15·P_success
 │    用途:补 Layer 1 没覆盖到的题(同义词、跨语言表达)         │
 ├─────────────────────────────────────────────────────────────┤
 │  Layer 3: 语义向量(方案 C,可选)                          │
-│    embedding_model.py — SentenceTransformer (bge-small-zh)   │
+│ embedding_model.py — SentenceTransformer (bge-small-zh-v1.5) │
 │    用 PyTorch 离线算 embedding 存 BLOB,在线暴力余弦         │
 │    用途:防漏召回,理解"DP" = "Dynamic Programming"          │
 └─────────────────────────────────────────────────────────────┘
@@ -184,7 +184,7 @@ score(tag | problem) = cosine(tfidf(problem), centroid[tag])
 
 #### Layer 3:语义向量(方案 C)— `services/embedding_model.py`
 
-**模型**:BAAI/bge-small-zh(中文优秀,200MB 左右)
+**模型**:BAAI/bge-small-zh-v1.5（中文题库，512 维）
 **存储**:BLOB 紧凑二进制(little-endian float32),2-3 千题 × 384 维约 4MB
 **降级机制**:
 - 未装 `sentence-transformers` → 跳过本层
@@ -490,23 +490,23 @@ TF-IDF 分数通常 < 0.5,阈值要低。
 
 ### Step 3:启用方案 C(可选,语义向量)
 
-需要先装 PyTorch + sentence-transformers,以及建表:
+embedding 表由后端 V65 migration 创建。模型只在离线 worker 中加载，在线服务读取版本化向量:
 
 ```powershell
-# 1. 装依赖
-uv run pip install sentence-transformers
+# 1. 装离线 embedding 依赖
+uv sync --extra embedding
 
-# 2. 在 MySQL 里建表
-mysql -uroot -p ptadatabase < sql/V13__create_leetcode_problem_embedding.sql
+# 2. 确认后端 Flyway 已迁移到 V65
 
-# 3. 离线算 embedding(首次会下载模型约 200MB)
-uv run python scripts/compute_embeddings.py
+# 3. 离线算 embedding，模型/版本/维度取自环境变量
+uv run --extra embedding python scripts/compute_embeddings.py
 
-# 可选:换英文模型
-uv run python scripts/compute_embeddings.py --model BAAI/bge-small-en-v1.5
+# Docker 先回填标签，再运行一次性 embedding worker
+docker compose --profile embedding run --rm tag-backfill
+docker compose --profile embedding run --rm embedding-worker
 ```
 
-跑完后,在线推荐会自动启用语义召回第 5 路(无需重启服务)。
+跑完后可通过 `/ready` 查看 active model、维度、覆盖率和错误信息。
 
 ### 验证预计算结果
 
@@ -519,7 +519,9 @@ SELECT
 FROM leetcode_problem_tag;
 
 -- 方案 C 后:embedding 表应该有数据
-SELECT model_name, COUNT(*) AS n FROM leetcode_problem_embedding GROUP BY model_name;
+SELECT model_name, model_revision, preprocessing_version, dim, COUNT(*) AS n
+FROM leetcode_problem_embedding
+GROUP BY model_name, model_revision, preprocessing_version, dim;
 ```
 
 ---
@@ -539,7 +541,7 @@ SELECT model_name, COUNT(*) AS n FROM leetcode_problem_embedding GROUP BY model_
 | Ebbinghaus | `EBBINGHAUS_ALPHA=0.12` | 成功次数增益系数 |
 | Ebbinghaus | `EBBINGHAUS_PR=12.0` | 练习遗忘度降低量 |
 | Wilson | `WILSON_Z=1.95` | 正态分布分位数 |
-| 排序权重 | `WEIGHT_NEED_MATCH=0.45` | 薄弱匹配度权重 |
+| 排序权重 | `WEIGHT_NEED_MATCH=0.40` | 薄弱匹配度权重 |
 | 排序权重 | `WEIGHT_DIFFICULTY_FIT=0.20` | 难度适配权重 |
 | 排序权重 | `WEIGHT_SUCCESS_PROB=0.15` | 通过概率权重 |
 | 排序权重 | `WEIGHT_NOVELTY=0.10` | 新颖度权重 |
@@ -620,7 +622,7 @@ print('OK')
 
 | 老师可能问 | 你这样答 |
 |---|---|
-| 怎么从文字匹配到题目? | 三层混合架构:① 词典加权匹配(54 知识点带中英同义词)② TF-IDF 质心模型(从已标注题学统计特征)③ 语义向量(bge-small-zh embedding),分层兜底 |
+| 怎么从文字匹配到题目? | 三层混合架构:① 词典加权匹配(54 知识点带中英同义词)② TF-IDF 质心模型(从已标注题学统计特征)③ 语义向量(bge-small-zh-v1.5 embedding),分层兜底 |
 | 关键词怎么选? | 人工词典 54 项 + 自动从 PTA 已标注题的统计特征双向来源 |
 | 2-3 千题怎么不靠 AI 实时跑? | 全部离线预计算:tag 表预打标、TF-IDF 模型预训练、embedding 预存,在线只是 SQL 查询 + 暴力余弦,延迟 <50ms |
 | AI 模型在哪? | 只用 SentenceTransformer 做 embedding(一次性离线),在线推荐不依赖任何 AI 调用,稳定可控 |

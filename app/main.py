@@ -56,6 +56,14 @@ app.include_router(webhook.router)
 app.include_router(webhook.internal_router)
 
 
+@app.on_event("startup")
+def expire_stale_recommendation_requests():
+    try:
+        mysql_client.fail_stale_pending_requests(settings.recommendation_pending_timeout_seconds)
+    except Exception:
+        logging.getLogger(__name__).warning("Failed to expire stale recommendation requests", exc_info=True)
+
+
 @app.on_event("shutdown")
 def shutdown_db_pool():
     mysql_client.close_all()

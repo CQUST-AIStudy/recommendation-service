@@ -7,7 +7,6 @@ User Modeling and User-Adapted Interaction, 4(4), 253-278.
 """
 from __future__ import annotations
 
-import math
 
 
 class BKTEngine:

@@ -1,4 +1,5 @@
 from .mysql_client import (
+    query,
     find_skill_state,
     find_all_skill_states,
     find_skills_needing_decay,
@@ -9,8 +10,9 @@ from .mysql_client import (
     find_problems_by_ids,
     find_problems_page,
     find_all_problems,
-    find_problem_ids_by_tags,
+    find_problem_ids_by_tag_names,
     find_tags_for_problem,
+    find_tags_for_problems,
     # 方案 A:离线打标相关
     find_problems_without_tags,
     find_problem_tag_count,
@@ -18,7 +20,7 @@ from .mysql_client import (
     # 方案 C:embedding 相关
     upsert_problem_embedding,
     find_embedding_count,
-    find_problem_ids_with_embeddings,
+    find_problem_embedding_hashes,
     # 错题本上下文(原有函数,re-export 补全)
     fetch_student_wrong_question_tags,
     fetch_student_wrong_question_tags_by_id,
@@ -33,11 +35,28 @@ from .mysql_client import (
     find_pta_tag_mappings,
     create_request,
     get_request,
-    complete_request,
+    complete_request_with_items,
     fail_request,
-    insert_recommend_items,
+    fail_stale_pending_requests,
     find_recommend_items,
     insert_feedback,
     find_feedback_by_student,
     close_all,
 )
+
+__all__ = [
+    "query", "find_skill_state", "find_all_skill_states", "find_skills_needing_decay",
+    "upsert_skill_state", "update_skill_scores", "find_problem_by_id",
+    "find_problems_by_difficulty", "find_problems_by_ids", "find_problems_page",
+    "find_all_problems", "find_problem_ids_by_tag_names",
+    "find_tags_for_problem", "find_tags_for_problems", "find_problems_without_tags", "find_problem_tag_count",
+    "upsert_problem_tag", "upsert_problem_embedding", "find_embedding_count",
+    "find_problem_embedding_hashes", "fetch_student_wrong_question_tags",
+    "fetch_student_wrong_question_tags_by_id", "find_student_by_id",
+    "find_student_by_student_no", "find_students_by_class",
+    "find_problem_attempts_for_student", "find_pta_high_frequency_errors",
+    "find_legacy_submit_situation", "find_pta_tag_mappings", "create_request",
+    "get_request", "complete_request_with_items", "fail_request", "fail_stale_pending_requests",
+    "find_recommend_items", "insert_feedback",
+    "find_feedback_by_student", "close_all",
+]

@@ -11,19 +11,21 @@ Step 6: 理由生成 + 持久化
 from __future__ import annotations
 
 import logging
+import json
 import uuid
 from datetime import datetime
 from typing import Any
 
 from app import db as db_mod
 from app.core.config import get_settings
-from .feedback import build_feedback_context, record_feedback as _record_feedback
+from .feedback import build_feedback_context
 from .ranking import (
     diversity_rerank,
     generate_reason_text,
     rank_and_score,
 )
 from .recall import collect_candidates
+from .knowledge_tags import canonicalize_tag_name
 from .unified_state import UnifiedStateEngine
 
 logger = logging.getLogger(__name__)
@@ -61,6 +63,7 @@ def _get_weights() -> dict[str, float]:
         "success_prob": s.weight_success_prob,
         "novelty": s.weight_novelty,
         "quality": s.weight_quality,
+        "semantic": s.weight_semantic,
         "repeat_penalty": s.weight_repeat_penalty,
         "wrong_question": s.weight_wrong_question,
         "pta_error": s.weight_pta_error,
@@ -69,29 +72,47 @@ def _get_weights() -> dict[str, float]:
 
 def generate_recommendation(student_id: int, limit: int = 20, scene: str = "default") -> str:
     """
-    异步生成推荐（在当前实现中同步执行，返回 request_id）。
+    同步生成推荐并返回 request_id，供 `/sync` 和内部测试使用。
 
     Returns
     -------
     str
         request_id
     """
+    settings = get_settings()
+    db_mod.fail_stale_pending_requests(settings.recommendation_pending_timeout_seconds)
     request_id = str(uuid.uuid4())
-
-    # 创建请求记录
     db_mod.create_request(request_id, student_id, scene, limit)
+    process_recommendation(request_id, student_id, limit)
+    return request_id
 
+
+def create_recommendation_request(student_id: int, limit: int = 20, scene: str = "default") -> str:
+    settings = get_settings()
+    db_mod.fail_stale_pending_requests(settings.recommendation_pending_timeout_seconds)
+    request_id = str(uuid.uuid4())
+    db_mod.create_request(request_id, student_id, scene, limit)
+    return request_id
+
+
+def process_recommendation(request_id: str, student_id: int, limit: int) -> None:
     try:
+        settings = get_settings()
+        request = db_mod.get_request(request_id)
+        created_at = request.get("created_at") if request else None
+        if created_at and (datetime.now() - created_at).total_seconds() > (
+            settings.recommendation_pending_timeout_seconds * 0.8
+        ):
+            db_mod.fail_request(request_id, "recommendation expired before processing")
+            return
         items = _generate_recommendation_sync(student_id, limit, request_id)
         if not items:
             db_mod.fail_request(request_id, "no recommendation generated")
         else:
-            db_mod.complete_request(request_id)
+            db_mod.complete_request_with_items(request_id, items)
     except Exception as exc:
         db_mod.fail_request(request_id, str(exc))
         logger.error("Recommendation failed: request_id=%s student_id=%s: %s", request_id, student_id, exc)
-
-    return request_id
 
 
 def _generate_recommendation_sync(student_id: int, limit: int, request_id: str) -> list[dict[str, Any]]:
@@ -99,10 +120,13 @@ def _generate_recommendation_sync(student_id: int, limit: int, request_id: str) 
     settings = get_settings()
 
     # Step 1: 画像快照
-    skill_profile = db_mod.find_all_skill_states(student_id)
+    skill_profile = [
+        {**state, "tag_name": canonicalize_tag_name(str(state.get("tag_name") or ""))}
+        for state in db_mod.find_all_skill_states(student_id)
+    ]
     if not skill_profile:
         logger.info("Student %s has no skill profile, using fallback", student_id)
-        return _fallback_recommendations(student_id, limit, request_id)
+        return _fallback_recommendations(student_id, limit, request_id, build_feedback_context(student_id))
 
     # Step 2: 反馈上下文 + 错题本上下文
     feedback_ctx = build_feedback_context(student_id)
@@ -110,11 +134,7 @@ def _generate_recommendation_sync(student_id: int, limit: int, request_id: str) 
     from app.services.wrong_question_features import (
         load_wrong_question_context_by_id,
         load_pta_error_context,
-        reset_cache_for_request,
     )
-    # Each recommendation request gets a fresh wrong-question snapshot so we
-    # never serve stale tag counts within a single pipeline run.
-    reset_cache_for_request()
     try:
         wrong_question_ctx = load_wrong_question_context_by_id(student_id)
     except Exception as exc:
@@ -136,15 +156,28 @@ def _generate_recommendation_sync(student_id: int, limit: int, request_id: str) 
         diff_ratio=settings.recall_difficulty_ratio,
         explore_ratio=settings.recall_exploration_ratio,
         student_id=student_id,
+        wrong_question_ratio=settings.recall_wrong_question_ratio,
+        semantic_ratio=settings.recall_semantic_ratio,
+        embedding_config={
+            "enabled": settings.embedding_enabled,
+            "model_name": settings.embedding_model_name,
+            "model_revision": settings.embedding_model_revision,
+            "preprocessing_version": settings.embedding_preprocessing_version,
+            "expected_dim": settings.embedding_expected_dim,
+            "min_score": settings.embedding_min_score,
+            "weak_threshold": settings.embedding_weak_threshold,
+        },
+        candidate_multiplier=settings.diversity_min_candidate_multiplier,
+        wrong_question_context=wrong_question_ctx,
     )
 
     if not candidates:
-        return _fallback_recommendations(student_id, limit, request_id)
+        return _fallback_recommendations(student_id, limit, request_id, feedback_ctx)
 
     # 预加载题目标签
     problem_ids = list(candidates.keys())
     problem_tags_map: dict[int, list[dict[str, Any]]] = {}
-    for pid in problem_ids[:100]:
+    for pid in problem_ids:
         try:
             problem_tags_map[pid] = db_mod.find_tags_for_problem(pid)
         except Exception:
@@ -174,6 +207,17 @@ def _generate_recommendation_sync(student_id: int, limit: int, request_id: str) 
         problem = scored["problem"]
         pid = scored["problem_id"]
         tags_for_problem = problem_tags_map.get(pid, [])
+        matched_tag = scored.get("matched_tag")
+        if not matched_tag and tags_for_problem:
+            matched_tag = tags_for_problem[0].get("tag_name")
+        recall_sources = scored.get("recall_sources") or []
+        provenance = {
+            "strategyVersion": "v2",
+            "recallSources": recall_sources,
+            "semanticScore": scored["score_semantic"],
+            "matchedTag": matched_tag,
+            "diversityRelaxed": bool(scored.get("diversity_relaxed")),
+        }
         reason = generate_reason_text(
             problem,
             scored["score_need_match"],
@@ -192,20 +236,31 @@ def _generate_recommendation_sync(student_id: int, limit: int, request_id: str) 
             "score_success_prob": scored["score_success_prob"],
             "score_novelty": scored["score_novelty"],
             "score_quality": scored["score_quality"],
+            "score_semantic": scored["score_semantic"],
             "reason_text": reason,
-            "reason_json": None,
+            "reason_json": json.dumps(provenance, ensure_ascii=False),
+            "matched_tag": matched_tag,
+            "recall_source": ",".join(recall_sources),
         }
         items.append(item)
 
-    # 批量入库
-    db_mod.insert_recommend_items(items)
     return items
 
 
-def _fallback_recommendations(student_id: int, limit: int, request_id: str) -> list[dict[str, Any]]:
+def _fallback_recommendations(
+    student_id: int,
+    limit: int,
+    request_id: str,
+    feedback_ctx: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
     """兜底推荐：按质量分排序取前N题。"""
     logger.warning("Using fallback recommendations for student_id=%s", student_id)
-    problems = db_mod.find_problems_page(0, limit)
+    excluded = set((feedback_ctx or {}).get("completed_problem_ids", []))
+    excluded.update((feedback_ctx or {}).get("disliked_problem_ids", []))
+    problems = [
+        problem for problem in db_mod.find_problems_page(0, max(limit * 3, limit))
+        if problem["id"] not in excluded
+    ][:limit]
 
     items = []
     for i, problem in enumerate(problems):
@@ -220,14 +275,20 @@ def _fallback_recommendations(student_id: int, limit: int, request_id: str) -> l
             "score_success_prob": 0.6,
             "score_novelty": 0.7,
             "score_quality": 0.8,
-            "reason_text": "系统推荐的优质题目，适合当前学习阶段。",
-            "reason_json": None,
+            "score_semantic": 0.0,
+            "reason_text": "当前画像不足，按题目质量提供冷启动推荐。",
+            "reason_json": json.dumps({
+                "strategyVersion": "v2",
+                "recallSources": ["fallback"],
+                "semanticScore": 0.0,
+                "matchedTag": None,
+                "diversityRelaxed": False,
+            }),
+            "matched_tag": None,
+            "recall_source": "fallback",
         }
         items.append(item)
 
-    if items:
-        db_mod.insert_recommend_items(items)
-        db_mod.complete_request(request_id)
     return items
 
 

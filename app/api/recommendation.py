@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, BackgroundTasks, Query
 
 from app import db as db_mod
 from app.core.responses import ApiError, api_success
@@ -19,22 +19,105 @@ from app.schemas.recommendation import (
 )
 from app.services import recommendation_service
 from app.services.feedback import record_feedback
+from app.services.knowledge_tags import canonicalize_tag_name
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/ai/recommendation", tags=["recommendation"])
 
 
+def _as_float(value, default: float = 0.0) -> float:
+    try:
+        return float(value) if value is not None else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _build_result(req: dict, raw_items: list[dict] | None = None) -> ResultResponse:
+    request_id = str(req["request_id"])
+    status = str(req.get("status") or "pending")
+    common = {
+        "request_id": request_id,
+        "status": status,
+        "student_id": req.get("student_id"),
+        "scene": req.get("scene"),
+        "request_limit": req.get("request_limit"),
+        "created_at": str(req["created_at"]) if req.get("created_at") else None,
+        "finished_at": str(req["finished_at"]) if req.get("finished_at") else None,
+        "error_message": req.get("error_message") if status == "failed" else None,
+    }
+    if status != "completed":
+        return ResultResponse(**common, items=[])
+
+    problem_ids = [int(row["problem_id"]) for row in raw_items or []]
+    tags_by_problem = db_mod.find_tags_for_problems(problem_ids)
+    skill_by_tag = {
+        canonicalize_tag_name(str(state.get("tag_name") or "")): state
+        for state in db_mod.find_all_skill_states(int(req.get("student_id") or 0))
+        if state.get("tag_name")
+    }
+    items = []
+    for row in raw_items or []:
+        tag_names: list[str] = []
+        problem_info = None
+        if row.get("title_main"):
+            tag_rows = tags_by_problem.get(int(row["problem_id"]), [])
+            tag_names = [str(tag["tag_name"]) for tag in tag_rows if tag.get("tag_name")]
+            problem_info = RecommendProblemInfo(
+                problem_id=int(row["problem_id"]),
+                title=str(row.get("title_main") or ""),
+                difficulty=str(row.get("difficulty") or ""),
+                source_url=row.get("source_url"),
+                estimated_minutes=int(row.get("estimated_minutes") or 30),
+                tags=tag_names,
+            )
+
+        matched_tag = row.get("matched_tag") or (tag_names[0] if tag_names else None)
+        forgetting_score = -1.0
+        last_practice_at = None
+        if matched_tag:
+            skill_state = skill_by_tag.get(canonicalize_tag_name(str(matched_tag)))
+            if skill_state:
+                forgetting_score = _as_float(skill_state.get("forgetting_score"), -1.0)
+                last_practice = skill_state.get("last_practice_at")
+                last_practice_at = str(last_practice) if last_practice else None
+
+        items.append(RecommendItemResponse(
+            rank_no=int(row.get("rank_no") or 0),
+            problem_id=int(row["problem_id"]),
+            score_total=_as_float(row.get("score_total")),
+            score_need_match=_as_float(row.get("score_need_match")),
+            score_difficulty_fit=_as_float(row.get("score_difficulty_fit")),
+            score_success_prob=_as_float(row.get("score_success_prob")),
+            score_novelty=_as_float(row.get("score_novelty")),
+            score_quality=_as_float(row.get("score_quality")),
+            score_semantic=_as_float(row.get("score_semantic")),
+            reason_text=str(row.get("reason_text") or ""),
+            matched_tag=str(matched_tag) if matched_tag else None,
+            recall_source=row.get("recall_source"),
+            problem=problem_info,
+            forgetting_score=forgetting_score,
+            last_practice_at=last_practice_at,
+        ))
+    return ResultResponse(**common, items=items)
+
+
 @router.post("/generate")
-def generate_recommendation(request: GenerateRequest):
+def generate_recommendation(request: GenerateRequest, background_tasks: BackgroundTasks):
     """
     生成个性化推荐（异步，返回 requestId 供轮询）。
     """
     try:
-        request_id = recommendation_service.generate_recommendation(
+        request_id = recommendation_service.create_recommendation_request(
             student_id=request.student_id,
             limit=request.limit,
             scene=request.scene,
+        )
+        background_tasks.add_task(
+            recommendation_service.process_recommendation,
+            request_id,
+            request.student_id,
+            request.limit,
         )
         return api_success(GenerateResponse(
             request_id=request_id,
@@ -55,83 +138,8 @@ def get_recommendation_result(requestId: str):
         if req is None:
             raise ApiError(404, f"Request {requestId} not found")
 
-        status = req.get("status", "pending")
-        created_at = str(req["created_at"]) if req.get("created_at") else None
-        finished_at = str(req["finished_at"]) if req.get("finished_at") else None
-
-        if status != "completed":
-            resp = ResultResponse(
-                request_id=requestId,
-                status=status,
-                student_id=req.get("student_id"),
-                scene=req.get("scene"),
-                request_limit=req.get("request_limit"),
-                created_at=created_at,
-                finished_at=finished_at,
-                error_message=req.get("error_message") if status == "failed" else None,
-                items=[],
-            )
-            return api_success(resp.model_dump(by_alias=True))
-
-        # 加载推荐结果
-        raw_items = db_mod.find_recommend_items(requestId)
-        items = []
-        for row in raw_items:
-            problem_info = None
-            if row.get("title_main"):
-                # 查询题目标签
-                tag_rows = db_mod.find_tags_for_problem(row["problem_id"])
-                tag_names = [t["tag_name"] for t in tag_rows if t.get("tag_name")]
-                problem_info = RecommendProblemInfo(
-                    problem_id=row["problem_id"],
-                    title=row.get("title_main", ""),
-                    difficulty=row.get("difficulty", ""),
-                    source_url=row.get("source_url"),
-                    estimated_minutes=row.get("estimated_minutes", 30),
-                    tags=tag_names,
-                )
-
-            # 查询关联技能的遗忘分数（通过题目标签关联到学生技能状态）
-            forgetting_score = -1.0  # 默认值：-1 表示未学习/新知识点
-            last_practice_at = None
-            matched_tag = row.get("matched_tag")
-            if not matched_tag and tag_names:
-                matched_tag = tag_names[0]  # 使用第一个知识点标签
-            if matched_tag:
-                skill_state = db_mod.find_skill_state(req.get("student_id", 0), matched_tag)
-                if skill_state:
-                    forgetting_score = float(skill_state.get("forgetting_score", 0))
-                    lpa = skill_state.get("last_practice_at")
-                    last_practice_at = str(lpa) if lpa else None
-                else:
-                    logger.debug("No skill state for student=%s tag=%s, using default forgetting_score=-1",
-                                 req.get("student_id"), matched_tag)
-
-            items.append(RecommendItemResponse(
-                rank_no=row["rank_no"],
-                problem_id=row["problem_id"],
-                score_total=float(row.get("score_total", 0)),
-                score_need_match=float(row.get("score_need_match", 0)),
-                score_difficulty_fit=float(row.get("score_difficulty_fit", 0)),
-                score_success_prob=float(row.get("score_success_prob", 0)),
-                score_novelty=float(row.get("score_novelty", 0)),
-                score_quality=float(row.get("score_quality", 0)),
-                reason_text=row.get("reason_text", ""),
-                problem=problem_info,
-                forgetting_score=forgetting_score,
-                last_practice_at=last_practice_at,
-            ))
-
-        return api_success(ResultResponse(
-            request_id=requestId,
-            status="completed",
-            student_id=req.get("student_id"),
-            scene=req.get("scene"),
-            request_limit=req.get("request_limit"),
-            created_at=created_at,
-            finished_at=finished_at,
-            items=items,
-        ).model_dump(by_alias=True))
+        raw_items = db_mod.find_recommend_items(requestId) if req.get("status") == "completed" else []
+        return api_success(_build_result(req, raw_items).model_dump(by_alias=True))
     except ApiError:
         raise
     except Exception as e:
@@ -174,7 +182,9 @@ def record_feedback_action(request: FeedbackRequest):
 
         # 从 requestId 获取 studentId
         req = db_mod.get_request(request.request_id)
-        student_id = req["student_id"] if req else 0
+        if not req:
+            raise ApiError(404, f"Request {request.request_id} not found")
+        student_id = req["student_id"]
 
         success = record_feedback(
             request_id=request.request_id,
@@ -202,65 +212,10 @@ def generate_recommendation_sync(request: SyncRequest):
         )
         # 立即查询结果（generate 内部已同步完成）
         req = db_mod.get_request(request_id)
-        if req is None or req.get("status") != "completed":
-            return api_success(ResultResponse(
-                request_id=request_id,
-                status="pending",
-                items=[],
-            ).model_dump(by_alias=True))
-
-        raw_items = db_mod.find_recommend_items(request_id)
-        items = []
-        for row in raw_items:
-            problem_info = None
-            if row.get("title_main"):
-                tag_rows = db_mod.find_tags_for_problem(row["problem_id"])
-                tag_names = [t["tag_name"] for t in tag_rows if t.get("tag_name")]
-                problem_info = RecommendProblemInfo(
-                    problem_id=row["problem_id"],
-                    title=row.get("title_main", ""),
-                    difficulty=row.get("difficulty", ""),
-                    source_url=row.get("source_url"),
-                    estimated_minutes=row.get("estimated_minutes", 30),
-                    tags=tag_names,
-                )
-
-            forgetting_score = -1.0  # 默认值：-1 表示未学习/新知识点
-            last_practice_at = None
-            # 通过题目标签关联到学生技能状态获取遗忘分数
-            matched_tag = row.get("matched_tag")
-            if not matched_tag and tag_names:
-                matched_tag = tag_names[0]
-            if matched_tag:
-                skill_state = db_mod.find_skill_state(request.student_id, matched_tag)
-                if skill_state:
-                    forgetting_score = float(skill_state.get("forgetting_score", 0))
-                    lpa = skill_state.get("last_practice_at")
-                    last_practice_at = str(lpa) if lpa else None
-                else:
-                    logger.debug("No skill state for student=%s tag=%s, using default forgetting_score=-1",
-                                 request.student_id, matched_tag)
-
-            items.append(RecommendItemResponse(
-                rank_no=row["rank_no"],
-                problem_id=row["problem_id"],
-                score_total=float(row.get("score_total", 0)),
-                score_need_match=float(row.get("score_need_match", 0)),
-                score_difficulty_fit=float(row.get("score_difficulty_fit", 0)),
-                score_success_prob=float(row.get("score_success_prob", 0)),
-                score_novelty=float(row.get("score_novelty", 0)),
-                score_quality=float(row.get("score_quality", 0)),
-                reason_text=row.get("reason_text", ""),
-                problem=problem_info,
-                forgetting_score=forgetting_score,
-                last_practice_at=last_practice_at,
-            ))
-
-        return api_success(ResultResponse(
-            request_id=request_id,
-            status="completed",
-            items=items,
-        ).model_dump(by_alias=True))
+        if req is None:
+            raise ApiError(500, "Recommendation request was not persisted")
+        raw_items = db_mod.find_recommend_items(request_id) if req.get("status") == "completed" else []
+        return api_success(_build_result(req, raw_items).model_dump(by_alias=True))
     except ApiError:
         raise
     except Exception as e:

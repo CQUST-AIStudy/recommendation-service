@@ -9,7 +9,7 @@
 依赖:
   sentence-transformers (含 PyTorch)
     pip install sentence-transformers
-  模型推荐: BAAI/bge-small-zh (中文优秀、200MB 上下)
+  模型推荐: BAAI/bge-small-zh-v1.5 (中文题库、512 维)
     或 BAAI/bge-small-en-v1.5 (英文)
 
 存储:
@@ -19,13 +19,15 @@ from __future__ import annotations
 
 import logging
 import math
+import json
+import struct
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
 # 模型单例(惰性加载,避免没装包时 import 报错)
 _MODEL = None
-_MODEL_NAME: str | None = None
+_MODEL_KEY: tuple[str, str] | None = None
 
 
 def is_available() -> bool:
@@ -37,15 +39,16 @@ def is_available() -> bool:
         return False
 
 
-def get_model(model_name: str = "BAAI/bge-small-zh"):
+def get_model(model_name: str = "BAAI/bge-small-zh-v1.5", revision: str = "main"):
     """惰性加载 SentenceTransformer 单例。"""
-    global _MODEL, _MODEL_NAME
-    if _MODEL is None or _MODEL_NAME != model_name:
+    global _MODEL, _MODEL_KEY
+    model_key = (model_name, revision)
+    if _MODEL is None or _MODEL_KEY != model_key:
         try:
             from sentence_transformers import SentenceTransformer
-            _MODEL = SentenceTransformer(model_name)
-            _MODEL_NAME = model_name
-            logger.info("Loaded embedding model: %s", model_name)
+            _MODEL = SentenceTransformer(model_name, revision=revision)
+            _MODEL_KEY = model_key
+            logger.info("Loaded embedding model: %s@%s", model_name, revision)
         except Exception as exc:
             logger.error("Failed to load embedding model %s: %s", model_name, exc)
             _MODEL = None
@@ -53,14 +56,18 @@ def get_model(model_name: str = "BAAI/bge-small-zh"):
     return _MODEL
 
 
-def encode_texts(texts: list[str], model_name: str = "BAAI/bge-small-zh") -> list[list[float]]:
+def encode_texts(
+    texts: list[str],
+    model_name: str = "BAAI/bge-small-zh-v1.5",
+    revision: str = "main",
+) -> list[list[float]]:
     """批量编码文本,返回 L2 归一化的向量(list of list of float)。
 
     返回 Python list 方便存 MySQL BLOB / JSON。
     """
     if not texts:
         return []
-    model = get_model(model_name)
+    model = get_model(model_name, revision)
     # SentenceTransformer 默认 batch encode,GPU 自动用 GPU
     vecs = model.encode(texts, normalize_embeddings=True, show_progress_bar=False)
     # numpy array → list of list
@@ -82,9 +89,6 @@ def cosine_many(query: list[float], vectors: list[list[float]]) -> list[float]:
 # ──────────────────────────────────────────
 # 序列化 (BLOB / JSON)
 # ──────────────────────────────────────────
-
-import json
-import struct
 
 
 def encode_blob(vec: list[float]) -> bytes:
@@ -114,7 +118,12 @@ def encode_json(vec: list[float]) -> str:
 # 工厂:从 DB 加载所有题向量
 # ──────────────────────────────────────────
 
-def load_all_embeddings() -> dict[int, list[float]]:
+def load_all_embeddings(
+    model_name: str,
+    model_revision: str,
+    preprocessing_version: str,
+    expected_dim: int,
+) -> dict[int, list[float]]:
     """从 leetcode_problem_embedding 表加载所有题向量。
 
     Returns
@@ -127,7 +136,10 @@ def load_all_embeddings() -> dict[int, list[float]]:
         with db_mod.query() as cur:
             # 用 try 是因为表可能还没建(方案 C 是可选的)
             cur.execute(
-                "SELECT problem_id, embedding_blob FROM leetcode_problem_embedding"
+                "SELECT problem_id, dim, embedding_blob FROM leetcode_problem_embedding "
+                "WHERE model_name = %s AND model_revision = %s "
+                "AND preprocessing_version = %s AND dim = %s",
+                (model_name, model_revision, preprocessing_version, expected_dim),
             )
             rows = cur.fetchall()
     except Exception as exc:
@@ -139,7 +151,11 @@ def load_all_embeddings() -> dict[int, list[float]]:
         blob = row.get("embedding_blob")
         if blob:
             try:
-                result[int(row["problem_id"])] = decode_blob(blob)
+                vector = decode_blob(blob)
+                if len(vector) != expected_dim or int(row["dim"]) != expected_dim:
+                    logger.warning("Skip embedding with invalid dim for pid=%s", row.get("problem_id"))
+                    continue
+                result[int(row["problem_id"])] = vector
             except Exception as exc:
                 logger.debug("Skip bad embedding for pid=%s: %s", row.get("problem_id"), exc)
     logger.info("Loaded %d problem embeddings", len(result))
@@ -148,6 +164,7 @@ def load_all_embeddings() -> dict[int, list[float]]:
 
 def find_weak_tag_centroids(
     skill_profile: list[dict[str, Any]],
+    embeddings: dict[int, list[float]],
     weak_threshold: float = 60.0,
 ) -> dict[str, list[float]]:
     """对每个弱项 tag,聚合所有有该 tag 标注的题向量,取平均作为该 tag 的代表向量。
@@ -156,14 +173,15 @@ def find_weak_tag_centroids(
     -------
     dict[tag_name, vector]
     """
-    embeddings = load_all_embeddings()
     if not embeddings:
         return {}
 
     from app import db as db_mod
     weak_tags = [
         s["tag_name"] for s in skill_profile
-        if s.get("tag_name") and (s.get("mastery_score") or 100) < weak_threshold
+        if s.get("tag_name")
+        and s.get("mastery_score") is not None
+        and float(s["mastery_score"]) < weak_threshold
     ]
     if not weak_tags:
         return {}
@@ -194,6 +212,9 @@ def find_weak_tag_centroids(
         if not vecs:
             continue
         dim = len(vecs[0])
+        if any(len(vector) != dim for vector in vecs):
+            logger.warning("Skip centroid with mixed dimensions for tag=%s", tag)
+            continue
         mean = [0.0] * dim
         for v in vecs:
             for i in range(dim):
@@ -206,6 +227,15 @@ def find_weak_tag_centroids(
             mean = [x / norm for x in mean]
         result[tag] = mean
     return result
+
+
+def best_matching_centroid_tag(
+    vector: list[float],
+    weak_centroids: dict[str, list[float]],
+) -> str | None:
+    if not vector or not weak_centroids:
+        return None
+    return max(weak_centroids, key=lambda tag: cosine_dense(vector, weak_centroids[tag]))
 
 
 def find_semantic_neighbors(

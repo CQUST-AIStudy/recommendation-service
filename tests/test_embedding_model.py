@@ -110,7 +110,6 @@ def test_find_semantic_neighbors_basic():
     )
     # 至少能返回 3 个 (pid 1, 2, 4 都过阈值)
     assert len(neighbors) <= 3
-    pids = [pid for pid, _ in neighbors]
     # Top1 必须是 pid 1 (cos=1.0)
     assert neighbors[0][0] == 1
     # 相似度按降序

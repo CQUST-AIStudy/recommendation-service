@@ -9,7 +9,6 @@ Psychological Science, 25(3), 639-647. (后续 DAS3H 模型见 Choffin et al., 2
 """
 from __future__ import annotations
 
-import math
 
 from .bkt import BKTEngine
 from .ebbinghaus import EbbinghausEngine

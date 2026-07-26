@@ -16,6 +16,7 @@ COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
 COPY app ./app
+COPY scripts ./scripts
 RUN uv sync --frozen --no-dev && \
     chown -R app:app /app
 
@@ -23,6 +24,6 @@ USER app
 
 EXPOSE 8003
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 CMD python -c "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:%s/health' % os.getenv('SERVICE_PORT', '8003'), timeout=3).read()" || exit 1
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 CMD python -c "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:%s/ready' % os.getenv('SERVICE_PORT', '8003'), timeout=3).read()" || exit 1
 
-CMD ["sh", "-c", "uv run --no-sync uvicorn app.main:app --host ${SERVICE_HOST:-0.0.0.0} --port ${SERVICE_PORT:-8003}"]
+CMD ["sh", "-c", "uv run --no-sync uvicorn app.main:app --host ${SERVICE_HOST:-0.0.0.0} --port ${SERVICE_PORT:-8003} --workers ${SERVICE_WORKERS:-2}"]

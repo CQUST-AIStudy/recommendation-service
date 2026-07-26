@@ -14,7 +14,6 @@
 from __future__ import annotations
 
 import logging
-import random
 from typing import Any
 
 from app import db as db_mod
@@ -32,9 +31,6 @@ def _num(value: Any, default: float = 0.0) -> float:
     except (TypeError, ValueError):
         return default
 
-
-# tag_category 枚举(对齐 DB schema)
-_TAG_CATEGORIES = ("algorithm", "data_structure", "technique")
 
 _EXPLORATION_TAGS = {"动态规划", "贪心", "回溯", "图", "树", "堆", "并查集", "位运算"}
 
@@ -58,26 +54,18 @@ def _find_by_tags(tags: list[str], limit: int) -> list[dict[str, Any]]:
     if not tags:
         return []
 
-    # 第一优先级:tag 表(SQL)。跨 category 查询避免漏掉数据结构题。
+    # 第一优先级:tag 表(SQL)。一次查询合并所有 category。
     tag_set = set(tags)
-    for cat in _TAG_CATEGORIES:
-        try:
-            ids = db_mod.find_problem_ids_by_tags(cat, tags)
-            if ids:
-                problems = db_mod.find_problems_by_ids(ids[:limit * 3])
-                seen: set[int] = set()
-                result = []
-                for p in problems:
-                    pid = p["id"]
-                    if pid not in seen:
-                        seen.add(pid)
-                        result.append(p)
-                    if len(result) >= limit:
-                        return result
-                if result:
-                    return result
-        except Exception as exc:
-            logger.warning("Tag DB lookup failed (cat=%s), will try text match: %s", cat, exc)
+    try:
+        ids = db_mod.find_problem_ids_by_tag_names(tags)
+        if ids:
+            problems = db_mod.find_problems_by_ids(ids[:limit * 3])
+            problem_by_id = {int(problem["id"]): problem for problem in problems}
+            result = [problem_by_id[pid] for pid in ids if pid in problem_by_id]
+            if result:
+                return result[:limit]
+    except Exception as exc:
+        logger.warning("Tag DB lookup failed, will try text match: %s", exc)
 
     # 第二优先级:打分式文本匹配(不再用朴素子串 in)
     all_problems = db_mod.find_all_problems(2000)
@@ -158,28 +146,14 @@ def recall_by_popularity(limit: int) -> list[dict[str, Any]]:
     return db_mod.find_problems_page(0, limit)
 
 
-def recall_by_wrong_question_signals(student_id: int | None, limit: int) -> list[dict[str, Any]]:
-    """错题本召回:从学生未掌握错题的 tag 反向拉取同 tag 候选题.
-
-    Falls back to [] if the student has no unresolved wrong questions.
-    """
-    if not student_id or limit <= 0:
-        return []
-    try:
-        from app.services.wrong_question_features import load_wrong_question_context_by_id
-        ctx = load_wrong_question_context_by_id(student_id)
-        tags = list((ctx.get("unresolved_tag_counts") or {}).keys())
-        if not tags:
-            return []
-        return _find_by_tags(tags, limit)
-    except Exception as exc:
-        logger.warning("recall_by_wrong_question_signals failed for student %s: %s", student_id, exc)
-        return []
-
-
 def recall_by_semantic(
     skill_profile: list[dict[str, Any]],
     limit: int,
+    model_name: str,
+    model_revision: str,
+    preprocessing_version: str,
+    expected_dim: int,
+    weak_threshold: float,
     min_score: float = 0.30,
 ) -> list[dict[str, Any]]:
     """方案 C 第六路召回:用题向量做语义近邻检索。
@@ -205,16 +179,22 @@ def recall_by_semantic(
     try:
         from app.services import embedding_model
         # 1) 检查方案 C 是否可用
-        if db_mod.find_embedding_count() == 0:
+        if db_mod.find_embedding_count(
+            model_name, model_revision, preprocessing_version, expected_dim,
+        ) == 0:
             return []
 
         # 2) 加载候选池(所有有向量的题)
-        all_embeddings = embedding_model.load_all_embeddings()
+        all_embeddings = embedding_model.load_all_embeddings(
+            model_name, model_revision, preprocessing_version, expected_dim,
+        )
         if not all_embeddings:
             return []
 
         # 3) 算弱项 tag 质心
-        weak_centroids = embedding_model.find_weak_tag_centroids(skill_profile)
+        weak_centroids = embedding_model.find_weak_tag_centroids(
+            skill_profile, all_embeddings, weak_threshold,
+        )
         if not weak_centroids:
             return []
 
@@ -232,10 +212,15 @@ def recall_by_semantic(
 
         # 6) 按相似度降序返回
         result: list[dict[str, Any]] = []
-        for pid, _ in neighbors:
+        for pid, score in neighbors:
             p = pid_to_problem.get(pid)
             if p:
-                result.append(p)
+                enriched = dict(p)
+                enriched["_semantic_score"] = float(score)
+                enriched["_matched_tag"] = embedding_model.best_matching_centroid_tag(
+                    all_embeddings[pid], weak_centroids,
+                )
+                result.append(enriched)
         return result
     except Exception as exc:
         logger.warning("recall_by_semantic failed (will degrade to A+B): %s", exc)
@@ -252,6 +237,9 @@ def collect_candidates(
     student_id: int | None = None,
     wrong_question_ratio: float = 0.20,
     semantic_ratio: float = 0.15,
+    embedding_config: dict[str, Any] | None = None,
+    candidate_multiplier: int = 3,
+    wrong_question_context: dict[str, Any] | None = None,
 ) -> dict[int, dict[str, Any]]:
     """
     多路召回合并去重 (方案 A+B+C 总共 6 路)。
@@ -278,54 +266,90 @@ def collect_candidates(
     """
     candidate_by_id: dict[int, dict[str, Any]] = {}
 
+    def add_candidates(problems: list[dict[str, Any]], source: str) -> None:
+        for problem in problems:
+            pid = int(problem["id"])
+            existing = candidate_by_id.get(pid)
+            if existing is None:
+                existing = dict(problem)
+                existing["_recall_sources"] = []
+                candidate_by_id[pid] = existing
+            sources = existing.setdefault("_recall_sources", [])
+            if source not in sources:
+                sources.append(source)
+            if source == "semantic":
+                existing["_semantic_score"] = max(
+                    float(existing.get("_semantic_score") or 0.0),
+                    float(problem.get("_semantic_score") or 0.0),
+                )
+                if problem.get("_matched_tag"):
+                    existing["_matched_tag"] = problem["_matched_tag"]
+
     # 路召回 1-3:弱项 / 难度 / 探索 (方案 A+B)
-    for p in recall_by_weakness(skill_profile, max(1, int(limit * weak_ratio))):
-        candidate_by_id.setdefault(p["id"], p)
+    if weak_ratio > 0:
+        add_candidates(recall_by_weakness(skill_profile, max(1, int(limit * weak_ratio))), "weakness")
 
-    for p in recall_by_difficulty(skill_profile, max(1, int(limit * diff_ratio))):
-        candidate_by_id.setdefault(p["id"], p)
+    if diff_ratio > 0:
+        add_candidates(recall_by_difficulty(skill_profile, max(1, int(limit * diff_ratio))), "difficulty")
 
-    for p in recall_by_exploration(skill_profile, max(1, int(limit * explore_ratio))):
-        candidate_by_id.setdefault(p["id"], p)
+    if explore_ratio > 0:
+        add_candidates(recall_by_exploration(skill_profile, max(1, int(limit * explore_ratio))), "exploration")
 
     # 路召回 4:错题本
     if student_id and wrong_question_ratio > 0:
-        for p in recall_by_wrong_question_signals(student_id, max(1, int(limit * wrong_question_ratio))):
-            candidate_by_id.setdefault(p["id"], p)
+        tags = list(((wrong_question_context or {}).get("unresolved_tag_counts") or {}).keys())
+        wrong_question_hits = _find_by_tags(tags, max(1, int(limit * wrong_question_ratio)))
+        add_candidates(wrong_question_hits, "wrong_question")
 
     # 路召回 5:语义近邻 (方案 C) - 优雅降级
-    if semantic_ratio > 0:
-        semantic_hits = recall_by_semantic(skill_profile, max(1, int(limit * semantic_ratio)))
+    if semantic_ratio > 0 and embedding_config and embedding_config.get("enabled"):
+        semantic_hits = recall_by_semantic(
+            skill_profile,
+            max(1, int(limit * semantic_ratio)),
+            model_name=str(embedding_config["model_name"]),
+            model_revision=str(embedding_config["model_revision"]),
+            preprocessing_version=str(embedding_config["preprocessing_version"]),
+            expected_dim=int(embedding_config["expected_dim"]),
+            weak_threshold=float(embedding_config["weak_threshold"]),
+            min_score=float(embedding_config["min_score"]),
+        )
         if semantic_hits:
-            for p in semantic_hits:
-                candidate_by_id.setdefault(p["id"], p)
+            add_candidates(semantic_hits, "semantic")
         else:
             logger.debug("Semantic recall unavailable, falling back to popularity only")
 
     # 路召回 6:热门题补足
-    for p in recall_by_popularity(max(1, limit - len(candidate_by_id))):
-        candidate_by_id.setdefault(p["id"], p)
+    add_candidates(recall_by_popularity(max(1, limit - len(candidate_by_id))), "popularity")
 
     # 历史过滤
     if feedback_ctx:
         disliked = set(feedback_ctx.get("disliked_problem_ids", []))
         completed = set(feedback_ctx.get("completed_problem_ids", []))
-        min_keep = max(3, limit // 2)
-
-        filtered = {
+        candidate_by_id = {
             pid: p for pid, p in candidate_by_id.items()
             if pid not in disliked and pid not in completed
         }
-        if len(filtered) >= min_keep:
-            candidate_by_id = filtered
-        else:
-            candidate_by_id = {pid: p for pid, p in candidate_by_id.items() if pid not in disliked}
+    else:
+        disliked = set()
+        completed = set()
 
     # 兜底补足
-    min_target = max(limit, min(60, limit * 3))
+    min_target = max(limit, min(60, limit * max(1, candidate_multiplier)))
     if len(candidate_by_id) < min_target:
-        extras = db_mod.find_problems_page(0, min_target * 2)
-        for p in extras:
-            candidate_by_id.setdefault(p["id"], p)
+        page_size = min(100, max(20, min_target * 2))
+        offset = 0
+        while len(candidate_by_id) < min_target:
+            extras = db_mod.find_problems_page(offset, page_size)
+            if not extras:
+                break
+            for p in extras:
+                if p["id"] in disliked or p["id"] in completed:
+                    continue
+                add_candidates([p], "supplement")
+                if len(candidate_by_id) >= min_target:
+                    break
+            if len(extras) < page_size:
+                break
+            offset += page_size
 
     return candidate_by_id

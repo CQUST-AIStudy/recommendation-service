@@ -144,3 +144,65 @@ Data flow: `student_skill_state` + `leetcode_problem_bank` + `leetcode_problem_t
 - `app/db/__init__.py` (+6 re-exports)
 - `review-stage/AUTO_REVIEW.md` (this file)
 - `review-stage/REVIEW_STATE.json` (status: completed)
+
+---
+
+# 2026-07-26 推荐与 Embedding 修复审核
+
+**Reviewer**: DeepSeek V4 Pro (`deepseek/deepseek-v4-pro`)
+**Task ID**: `ses_063578c91ffeEF4KYAtoK380NM`
+**Independence**: cross-family
+**Acceptance**: accepted
+
+## Round 1 (2026-07-26 12:25)
+
+### Assessment (Summary)
+- Score: 3/10
+- Verdict: not ready
+- 关键问题：标签中英文断裂、V65 可重入性与 hash 不一致、全局缓存并发、伪异步、权重和部署链风险。
+- 一项误判：Reviewer 认为 Controller 注入随机推荐空壳；实际所有线上注入点都显式使用 `intelligentRecommendationService` HTTP 代理。
+
+### Actions Taken
+- 删除全部未调用的 Java 随机/重复推荐实现，消除未来误用。
+- Java/Python 统一中文 canonical tag；新增 V66 存量英文标签迁移。
+- V65 改为可重入，统一 SQL/Python hash，逐列幂等增加 provenance。
+- 删除进程级错题缓存；`/generate` 改为 BackgroundTasks。
+- 统一权重归一化，补足召回改为分页。
+
+## Round 2 (2026-07-26 12:45)
+
+### Assessment (Summary)
+- Score: 7/10
+- Verdict: almost
+- Round 1 阻断项全部关闭。
+- 剩余问题：feedback 不存在请求、结果 N+1、pending 超时、V66 合并确定性、硬编码密钥。
+
+### Actions Taken
+- 未知 feedback 返回 404。
+- 标签与技能状态改为批量查询。
+- 增加 DB connect/read/write timeout、stale pending 清理和 `SELECT FOR UPDATE` 状态锁。
+- V66 使用分组 MIN/MAX 确定性合并。
+- 移除邮件、DB、OpenAI、MinIO 默认密钥及公网 DB 默认地址。
+
+## Round 3 (2026-07-26 13:35)
+
+### Assessment (Summary)
+- Score: 9/10
+- Verdict: ready
+- Reviewer 明确认定无阻断部署问题。
+- 唯一建议：后台任务排队过久时计算前过期；清理遗漏 MinIO secret。
+
+### Actions Taken
+- `process_recommendation` 计算前检查请求年龄，超过阈值 80% 直接失败。
+- `MINIO_SECRET_KEY` 默认值改为空。
+
+### Results
+- Python: 73 tests passed；Ruff all checks passed。
+- Java: Maven full tests passed。
+- V65 在 canonical/legacy schema 上连续执行两次；V66 英文 problem/skill 标签迁移后均为 0。
+- 本地 Flyway schema 为 V66，checksum 已 repair。
+- 真实 `BAAI/bge-small-zh-v1.5` 512 维 embedding 5/5，覆盖率 100%。
+- `/generate` pending → `/result` completed，返回 5 项。
+
+### Status
+- STOP：score 9 >= 6 且 verdict=ready。

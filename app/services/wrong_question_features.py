@@ -11,44 +11,28 @@ from typing import Any
 
 from app import db as db_mod
 from app.core.config import get_settings
+from app.services.knowledge_tags import canonicalize_tag_name
 
 logger = logging.getLogger(__name__)
 
-# Per-process cache. reset_cache_for_request() clears it at the start of each
-# recommendation request so stale data does not leak across students.
-_cache: dict[str, dict[str, Any]] = {}
-
-
 def load_wrong_question_context_by_id(student_id: int) -> dict[str, Any]:
-    """Load (and cache) wrong-question tag context keyed by student_id.
+    """Load wrong-question tag context keyed by student_id.
 
     The recommendation pipeline speaks in student_id space, so this is the
     primary entry point. Internally it resolves student_id -> student_no.
     """
     if not student_id:
         return _empty_context()
-    key = f"id:{student_id}"
-    if key in _cache:
-        return _cache[key]
-
     rows = db_mod.fetch_student_wrong_question_tags_by_id(student_id)
-    ctx = _build_context(rows)
-    _cache[key] = ctx
-    return ctx
+    return _build_context(rows)
 
 
 def load_wrong_question_context_by_no(student_no: str) -> dict[str, Any]:
-    """Load (and cache) wrong-question tag context keyed by student_no."""
+    """Load wrong-question tag context keyed by student_no."""
     if not student_no:
         return _empty_context()
-    key = f"no:{student_no}"
-    if key in _cache:
-        return _cache[key]
-
     rows = db_mod.fetch_student_wrong_question_tags(student_no)
-    ctx = _build_context(rows)
-    _cache[key] = ctx
-    return ctx
+    return _build_context(rows)
 
 
 def load_pta_error_context_by_no(student_no: str, min_errors: int = 5) -> dict[str, Any]:
@@ -70,10 +54,6 @@ def load_pta_error_context(student_id: int, min_errors: int = 5) -> dict[str, An
     """
     if not student_id:
         return _empty_pta_context()
-    key = f"pta:{student_id}:{min_errors}"
-    if key in _cache:
-        return _cache[key]
-
     rows = db_mod.find_pta_high_frequency_errors(student_id, min_errors)
 
     pta_items = []
@@ -100,7 +80,6 @@ def load_pta_error_context(student_id: int, min_errors: int = 5) -> dict[str, An
         "pta_tag_counts": tag_counts,
         "total_pta_errors": sum(i["error_count"] for i in pta_items),
     }
-    _cache[key] = ctx
     return ctx
 
 
@@ -122,7 +101,8 @@ def _load_pta_error_tags_from_db(
         kw = (m.get("pta_keyword") or "").casefold()
         if not kw:
             continue
-        tag = m.get("leetcode_tag")
+        raw_tag = m.get("leetcode_tag")
+        tag = canonicalize_tag_name(str(raw_tag)) if raw_tag else None
         relevance = float(m.get("relevance") or 0.8)
         if not tag:
             continue
@@ -137,11 +117,6 @@ def _load_pta_error_tags_from_db(
                     weighted = int(error_count * rel) or 1
                     tag_counts[tag] = tag_counts.get(tag, 0) + weighted
     return tag_counts
-
-
-def reset_cache_for_request() -> None:
-    """Clear the cache. Called at the start of every recommendation request."""
-    _cache.clear()
 
 
 def compute_wrong_question_boost(
@@ -223,7 +198,7 @@ def _build_context(rows: list[dict[str, Any]]) -> dict[str, Any]:
         is_resolved = bool(r.get("is_resolved"))
         bucket = resolved if is_resolved else unresolved
         for tag in tags_csv.split(","):
-            t = tag.strip()
+            t = canonicalize_tag_name(tag)
             if not t:
                 continue
             bucket[t] = bucket.get(t, 0) + 1

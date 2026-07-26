@@ -356,6 +356,24 @@ KNOWLEDGE_TAGS: dict[str, dict[str, Any]] = {
     },
 }
 
+LEGACY_TAG_NAMES: dict[str, str] = {
+    "array": "数组", "linked_list": "链表", "stack": "栈", "queue": "队列",
+    "tree": "树", "binary_tree": "树", "heap": "堆", "hash_table": "哈希表",
+    "graph": "图", "string": "字符串", "sorting": "排序", "searching": "二分查找",
+    "binary_search": "二分查找", "dfs": "深度优先搜索", "bfs": "广度优先搜索",
+    "backtracking": "回溯", "greedy": "贪心", "divide_conquer": "分治",
+    "graph_traversal": "图", "shortest_path": "最短路", "two_pointers": "双指针",
+    "sliding_window": "滑动窗口", "dynamic_programming": "动态规划",
+    "bit_manipulation": "位运算", "math": "数学", "simulation": "模拟",
+    "prefix_sum": "前缀和", "monotonic_stack": "单调栈", "union_find": "并查集",
+    "trie": "字典树",
+}
+
+
+def canonicalize_tag_name(tag_name: str) -> str:
+    normalized = tag_name.strip()
+    return LEGACY_TAG_NAMES.get(normalized.casefold(), normalized)
+
 
 # ──────────────────────────────────────────
 # 反向索引:小写英文/中文关键词 → (tag, weight)
@@ -381,18 +399,18 @@ _KEYWORD_INDEX = _build_keyword_index()
 
 def get_tag_meta(tag_name: str) -> dict[str, Any] | None:
     """获取某个 tag 的元数据(category, course_weight, 同义词)。"""
-    return KNOWLEDGE_TAGS.get(tag_name)
+    return KNOWLEDGE_TAGS.get(canonicalize_tag_name(tag_name))
 
 
 def get_course_weight(tag_name: str) -> float:
     """对齐旧 _COURSE_WEIGHTS 的行为,默认 0.5。"""
-    meta = KNOWLEDGE_TAGS.get(tag_name)
+    meta = KNOWLEDGE_TAGS.get(canonicalize_tag_name(tag_name))
     return float(meta["course_weight"]) if meta else 0.5
 
 
 def get_english_synonyms(tag_name: str) -> list[str]:
     """对齐旧 _get_english_tag 的行为,返回英文同义词列表。"""
-    meta = KNOWLEDGE_TAGS.get(tag_name)
+    meta = KNOWLEDGE_TAGS.get(canonicalize_tag_name(tag_name))
     return meta["en"] if meta else []
 
 
@@ -433,6 +451,7 @@ def tag_relevance_score(
     float
         相关性分数。未命中返回 0.0。
     """
+    tag_name = canonicalize_tag_name(tag_name)
     meta = KNOWLEDGE_TAGS.get(tag_name)
     if not meta:
         # 未收录的 tag:回退到最朴素的子串匹配,但降权 (0.5)

@@ -24,7 +24,6 @@ _DEFAULT_DELTAS: dict[str, float] = {
 }
 
 _ACTION_DELTAS: dict[str, float] | None = None
-_VALID_ACTIONS = set(_DEFAULT_DELTAS.keys())
 
 
 def _get_deltas() -> dict[str, float]:
@@ -40,6 +39,7 @@ def _get_deltas() -> dict[str, float]:
             "dislike": s.feedback_delta_dislike,
         }
     return _ACTION_DELTAS
+
 
 _VALID_ACTIONS = set(_DEFAULT_DELTAS.keys())
 

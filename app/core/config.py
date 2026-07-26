@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -12,20 +13,25 @@ class Settings(BaseSettings):
     db_user: str = "root"
     db_password: str = ""
     db_name: str = "ptadatabase"
+    db_connect_timeout_seconds: int = Field(5, ge=1, le=60)
+    db_read_timeout_seconds: int = Field(30, ge=1, le=300)
+    db_write_timeout_seconds: int = Field(30, ge=1, le=300)
 
     # ── Service ──
     service_host: str = "0.0.0.0"
     service_port: int = 8003
+    recommendation_pending_timeout_seconds: int = Field(60, ge=10, le=3600)
 
     # ── Recommendation weights ──
-    weight_need_match: float = 0.40
-    weight_difficulty_fit: float = 0.20
-    weight_success_prob: float = 0.15
-    weight_novelty: float = 0.10
-    weight_quality: float = 0.10
-    weight_repeat_penalty: float = 0.15
-    weight_wrong_question: float = 0.10
-    weight_pta_error: float = 0.12
+    weight_need_match: float = Field(0.40, ge=0, le=1)
+    weight_difficulty_fit: float = Field(0.20, ge=0, le=1)
+    weight_success_prob: float = Field(0.15, ge=0, le=1)
+    weight_novelty: float = Field(0.10, ge=0, le=1)
+    weight_quality: float = Field(0.10, ge=0, le=1)
+    weight_semantic: float = Field(0.10, ge=0, le=1)
+    weight_repeat_penalty: float = Field(0.15, ge=0, le=1)
+    weight_wrong_question: float = Field(0.10, ge=0, le=1)
+    weight_pta_error: float = Field(0.12, ge=0, le=1)
 
     # ── BKT parameters (Corbett & Anderson 1995) ──
     bkt_p_transfer: float = 0.14
@@ -47,9 +53,20 @@ class Settings(BaseSettings):
     wilson_z: float = 1.95
 
     # ── Recall ratios ──
-    recall_weak_ratio: float = 0.60
-    recall_difficulty_ratio: float = 0.25
-    recall_exploration_ratio: float = 0.15
+    recall_weak_ratio: float = Field(0.60, ge=0, le=1)
+    recall_difficulty_ratio: float = Field(0.25, ge=0, le=1)
+    recall_exploration_ratio: float = Field(0.15, ge=0, le=1)
+    recall_wrong_question_ratio: float = Field(0.20, ge=0, le=1)
+    recall_semantic_ratio: float = Field(0.15, ge=0, le=1)
+
+    # ── Offline embedding dataset used by online semantic recall ──
+    embedding_enabled: bool = True
+    embedding_model_name: str = "BAAI/bge-small-zh-v1.5"
+    embedding_model_revision: str = "main"
+    embedding_preprocessing_version: str = "v1"
+    embedding_expected_dim: int = Field(512, ge=1)
+    embedding_min_score: float = Field(0.30, ge=-1, le=1)
+    embedding_weak_threshold: float = Field(60.0, ge=0, le=100)
 
     # ── Feedback score deltas ──
     feedback_delta_exposure: float = -0.01
@@ -63,8 +80,26 @@ class Settings(BaseSettings):
     feedback_max_history: int = 300
 
     # ── Diversity ──
-    diversity_max_tag_ratio: float = 0.40
-    diversity_min_candidate_multiplier: int = 3
+    diversity_max_tag_ratio: float = Field(0.40, gt=0, le=1)
+    diversity_min_candidate_multiplier: int = Field(3, ge=1)
+
+    @model_validator(mode="after")
+    def validate_recommendation_config(self) -> "Settings":
+        if self.recall_weak_ratio + self.recall_difficulty_ratio + self.recall_exploration_ratio <= 0:
+            raise ValueError("at least one base recall ratio must be positive")
+        positive_weights = (
+            self.weight_need_match
+            + self.weight_difficulty_fit
+            + self.weight_success_prob
+            + self.weight_novelty
+            + self.weight_quality
+            + self.weight_semantic
+            + self.weight_wrong_question
+            + self.weight_pta_error
+        )
+        if positive_weights <= 0:
+            raise ValueError("at least one positive ranking weight must be configured")
+        return self
 
     @property
     def cors_origins(self) -> list[str]:

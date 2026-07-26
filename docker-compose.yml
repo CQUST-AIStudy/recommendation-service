@@ -13,6 +13,34 @@ services:
     networks:
       - cqust-ai-net
 
+  embedding-worker:
+    profiles: ["embedding"]
+    build:
+      context: .
+      dockerfile: Dockerfile.embedding
+    image: recommendation-embedding-worker:latest
+    env_file:
+      - ${APP_ENV_FILE:-.env.docker}
+    volumes:
+      - embedding-model-cache:/models
+    networks:
+      - cqust-ai-net
+
+  tag-backfill:
+    profiles: ["embedding"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: recommendation-service:latest
+    env_file:
+      - ${APP_ENV_FILE:-.env.docker}
+    command: ["uv", "run", "--no-sync", "python", "scripts/backfill_problem_tags.py", "--rescore"]
+    networks:
+      - cqust-ai-net
+
+volumes:
+  embedding-model-cache:
+
 networks:
   cqust-ai-net:
     name: ${DOCKER_NETWORK:-cqust-ai-net}

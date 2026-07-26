@@ -1,7 +1,6 @@
 from app import db as db_mod
 from app.services.wrong_question_features import (
     load_pta_error_context,
-    reset_cache_for_request,
 )
 
 
@@ -27,7 +26,6 @@ def test_pta_error_context_exposes_knowledge_metadata(monkeypatch):
     )
     monkeypatch.setattr(db_mod, "find_pta_tag_mappings", lambda: [])
 
-    reset_cache_for_request()
     context = load_pta_error_context(12, min_errors=1)
 
     assert context["pta_items"][0]["knowledge_point"] == "二叉树遍历"

@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import logging
 import sys
 from pathlib import Path
@@ -30,6 +31,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app import db as db_mod
+from app.core.config import get_settings
 from app.services import embedding_model
 
 logging.basicConfig(
@@ -39,14 +41,21 @@ logging.basicConfig(
 log = logging.getLogger("compute_embeddings")
 
 
-def ensure_table_exists() -> bool:
+def ensure_table_exists(
+    model_name: str,
+    model_revision: str,
+    preprocessing_version: str,
+    expected_dim: int,
+) -> bool:
     """检查 leetcode_problem_embedding 表是否已建。
 
     推荐做法是手动执行 sql/V13__create_leetcode_problem_embedding.sql。
     本脚本不做自动建表(避免 schema 管理混乱)。
     """
     try:
-        n = db_mod.find_embedding_count()
+        db_mod.find_embedding_count(
+            model_name, model_revision, preprocessing_version, expected_dim,
+        )
         return True  # 表存在(可能是 0 行)
     except Exception as exc:
         log.error(
@@ -57,11 +66,19 @@ def ensure_table_exists() -> bool:
 
 
 def main() -> int:
+    settings = get_settings()
     parser = argparse.ArgumentParser(description="离线计算 leetcode_problem_embedding")
     parser.add_argument(
-        "--model", default="BAAI/bge-small-zh",
-        help="SentenceTransformer 模型名 (默认 BAAI/bge-small-zh)",
+        "--model", default=settings.embedding_model_name,
+        help="SentenceTransformer 模型名",
     )
+    parser.add_argument("--revision", default=settings.embedding_model_revision, help="模型 revision")
+    parser.add_argument(
+        "--preprocessing-version",
+        default=settings.embedding_preprocessing_version,
+        help="输入文本预处理版本",
+    )
+    parser.add_argument("--expected-dim", type=int, default=settings.embedding_expected_dim)
     parser.add_argument("--batch-size", type=int, default=16, help="批大小")
     parser.add_argument("--max-problems", type=int, default=5000, help="最多编码多少题")
     parser.add_argument("--force", action="store_true", help="强制重算已编码的题")
@@ -76,52 +93,79 @@ def main() -> int:
         return 1
 
     # 2) 检查表
-    if not ensure_table_exists():
+    if not ensure_table_exists(
+        args.model, args.revision, args.preprocessing_version, args.expected_dim,
+    ):
         return 1
 
-    # 3) 加载模型
-    try:
-        embedding_model.get_model(args.model)
-    except Exception:
-        log.error("模型加载失败,退出")
-        return 1
-
-    # 4) 决定要编码哪些题
-    already = db_mod.find_problem_ids_with_embeddings(args.model) if not args.force else set()
+    # 3) 决定要编码哪些题
     all_problems = db_mod.find_all_problems(args.max_problems)
-    todo = [p for p in all_problems if p["id"] not in already]
+    existing_hashes = {} if args.force else db_mod.find_problem_embedding_hashes(
+        args.model, args.revision, args.preprocessing_version,
+    )
+
+    def build_text(problem: dict) -> str:
+        return " ".join(filter(None, [
+            str(problem.get("title_main") or "").strip(),
+            str(problem.get("title_alt") or "").strip(),
+            str(problem.get("problem_text") or "").strip(),
+        ]))
+
+    def content_hash(text: str) -> str:
+        payload = f"{args.preprocessing_version}\0{text}".encode("utf-8")
+        return hashlib.sha256(payload).hexdigest()
+
+    prepared = [(problem, build_text(problem)) for problem in all_problems]
+    todo = [
+        (problem, text, content_hash(text))
+        for problem, text in prepared
+        if existing_hashes.get(int(problem["id"])) != content_hash(text)
+    ]
     log.info(
-        "待编码: %d 道 (已编码: %d, 跳过)", len(todo), len(already),
+        "待编码: %d 道 (已有同版本向量: %d)", len(todo), len(existing_hashes),
     )
 
     if not todo:
         log.info("没有需要编码的题,退出")
         return 0
 
+    # 4) 仅在确实需要编码时加载模型
+    try:
+        embedding_model.get_model(args.model, args.revision)
+    except Exception:
+        log.error("模型加载失败,退出")
+        return 1
+
     # 5) 批量编码 + 写库
     n_done = 0
     n_failed = 0
     for batch_start in range(0, len(todo), args.batch_size):
         batch = todo[batch_start:batch_start + args.batch_size]
-        texts = [
-            (p.get("title_main", "") + " " + (p.get("problem_text", "") or "")).strip()
-            for p in batch
-        ]
+        texts = [text for _, text, _ in batch]
 
         try:
-            vectors = embedding_model.encode_texts(texts, model_name=args.model)
+            vectors = embedding_model.encode_texts(
+                texts, model_name=args.model, revision=args.revision,
+            )
         except Exception as exc:
             log.error("批 %d-%d 编码失败: %s", batch_start, batch_start + len(batch), exc)
             n_failed += len(batch)
             continue
 
-        for p, vec in zip(batch, vectors):
+        for (problem, _, digest), vec in zip(batch, vectors):
             try:
+                if len(vec) != args.expected_dim:
+                    raise ValueError(
+                        f"embedding dim {len(vec)} does not match expected {args.expected_dim}"
+                    )
                 blob = embedding_model.encode_blob(vec)
-                db_mod.upsert_problem_embedding(p["id"], args.model, len(vec), blob)
+                db_mod.upsert_problem_embedding(
+                    problem["id"], args.model, args.revision,
+                    args.preprocessing_version, digest, len(vec), blob,
+                )
                 n_done += 1
             except Exception as exc:
-                log.warning("写入失败 pid=%s: %s", p["id"], exc)
+                log.warning("写入失败 pid=%s: %s", problem["id"], exc)
                 n_failed += 1
 
         log.info(

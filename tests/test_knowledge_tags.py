@@ -11,12 +11,19 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.services.knowledge_tags import (
+    canonicalize_tag_name,
     KNOWLEDGE_TAGS,
     detect_tags_for_problem,
     get_course_weight,
     get_english_synonyms,
     tag_relevance_score,
 )
+
+
+def test_legacy_tag_names_are_canonicalized():
+    assert canonicalize_tag_name("dynamic_programming") == "动态规划"
+    assert canonicalize_tag_name("ARRAY") == "数组"
+    assert canonicalize_tag_name("动态规划") == "动态规划"
 
 
 # ──────────────────────────────────────────

@@ -1,7 +1,6 @@
 """
 算法单元测试 — 验证 BKT、Ebbinghaus、Wilson 三个数学模型的正确性。
 """
-import math
 from app.services.bkt import BKTEngine
 from app.services.ebbinghaus import EbbinghausEngine
 from app.services.wilson import WilsonEngine

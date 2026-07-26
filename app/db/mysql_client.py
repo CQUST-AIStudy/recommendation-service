@@ -34,6 +34,9 @@ def _create_conn() -> pymysql.Connection:
         charset="utf8mb4",
         cursorclass=DictCursor,
         autocommit=False,
+        connect_timeout=s.db_connect_timeout_seconds,
+        read_timeout=s.db_read_timeout_seconds,
+        write_timeout=s.db_write_timeout_seconds,
     )
 
 
@@ -133,6 +136,7 @@ def query() -> Generator[DictCursor, None, None]:
         yield cursor
     finally:
         cursor.close()
+        conn.rollback()
         release_conn(conn)
 
 
@@ -244,26 +248,46 @@ def find_all_problems(limit: int = 1000) -> list[dict[str, Any]]:
         return cur.fetchall()
 
 
-def find_problem_ids_by_tags(tag_category: str, tags: list[str]) -> list[int]:
+def find_problem_ids_by_tag_names(tags: list[str]) -> list[int]:
     if not tags:
         return []
     placeholders = ",".join(["%s"] * len(tags))
     with query() as cur:
         cur.execute(
-            f"""SELECT DISTINCT problem_id FROM leetcode_problem_tag
-            WHERE tag_category = %s AND tag_name IN ({placeholders})
-            ORDER BY problem_id""",
-            [tag_category, *tags],
+            f"""SELECT problem_id, MAX(relevance_score) AS relevance
+            FROM leetcode_problem_tag
+            WHERE tag_name IN ({placeholders})
+            GROUP BY problem_id
+            ORDER BY relevance DESC, problem_id""",
+            tags,
         )
-        return [row["problem_id"] for row in cur.fetchall()]
+        return [int(row["problem_id"]) for row in cur.fetchall()]
 
 
 def find_tags_for_problem(problem_id: int) -> list[dict[str, Any]]:
     with query() as cur:
         cur.execute(
-            "SELECT * FROM leetcode_problem_tag WHERE problem_id = %s", (problem_id,)
+            "SELECT * FROM leetcode_problem_tag WHERE problem_id = %s "
+            "ORDER BY is_primary DESC, relevance_score DESC, tag_name",
+            (problem_id,),
         )
         return cur.fetchall()
+
+
+def find_tags_for_problems(problem_ids: list[int]) -> dict[int, list[dict[str, Any]]]:
+    if not problem_ids:
+        return {}
+    placeholders = ",".join(["%s"] * len(problem_ids))
+    with query() as cur:
+        cur.execute(
+            f"SELECT * FROM leetcode_problem_tag WHERE problem_id IN ({placeholders}) "
+            "ORDER BY problem_id, is_primary DESC, relevance_score DESC, tag_name",
+            problem_ids,
+        )
+        grouped: dict[int, list[dict[str, Any]]] = {}
+        for row in cur.fetchall():
+            grouped.setdefault(int(row["problem_id"]), []).append(row)
+        return grouped
 
 
 def find_problems_without_tags(limit: int = 500) -> list[dict[str, Any]]:
@@ -339,42 +363,60 @@ def get_request(request_id: str) -> dict[str, Any] | None:
         return cur.fetchone()
 
 
-def complete_request(request_id: str) -> None:
-    with transaction() as cur:
-        cur.execute(
-            "UPDATE leetcode_recommend_request SET status = 'completed', finished_at = NOW() "
-            "WHERE request_id = %s",
-            (request_id,),
-        )
-
-
 def fail_request(request_id: str, error_message: str) -> None:
     with transaction() as cur:
         cur.execute(
             "UPDATE leetcode_recommend_request SET status = 'failed', "
-            "error_message = %s, finished_at = NOW() WHERE request_id = %s",
+            "error_message = %s, finished_at = NOW() WHERE request_id = %s AND status = 'pending'",
             (error_message[:512], request_id),
         )
+
+
+def fail_stale_pending_requests(timeout_seconds: int) -> int:
+    with transaction() as cur:
+        cur.execute(
+            "UPDATE leetcode_recommend_request SET status = 'failed', "
+            "error_message = 'recommendation generation timed out', finished_at = NOW() "
+            "WHERE status = 'pending' "
+            "AND created_at < TIMESTAMPADD(SECOND, -%s, NOW())",
+            (timeout_seconds,),
+        )
+        return int(cur.rowcount)
 
 
 # ──────────────────────────────────────────
 # leetcode_recommend_item CRUD
 # ──────────────────────────────────────────
 
-def insert_recommend_items(items: list[dict[str, Any]]) -> None:
+def complete_request_with_items(request_id: str, items: list[dict[str, Any]]) -> None:
+    """Persist recommendation items and the completed state atomically."""
     if not items:
-        return
+        raise ValueError("cannot complete recommendation request without items")
     with transaction() as cur:
+        cur.execute(
+            "SELECT status FROM leetcode_recommend_request WHERE request_id = %s FOR UPDATE",
+            (request_id,),
+        )
+        request = cur.fetchone()
+        if not request or request.get("status") != "pending":
+            raise RuntimeError("recommendation request is no longer pending")
         cur.executemany(
             """INSERT INTO leetcode_recommend_item
             (request_id, student_id, rank_no, problem_id, score_total,
              score_need_match, score_difficulty_fit, score_success_prob,
-             score_novelty, score_quality, reason_text, reason_json)
+             score_novelty, score_quality, score_semantic, reason_text, reason_json,
+             matched_tag, recall_source)
             VALUES (%(request_id)s, %(student_id)s, %(rank_no)s, %(problem_id)s,
                     %(score_total)s, %(score_need_match)s, %(score_difficulty_fit)s,
                     %(score_success_prob)s, %(score_novelty)s, %(score_quality)s,
-                    %(reason_text)s, %(reason_json)s)""",
+                    %(score_semantic)s, %(reason_text)s, %(reason_json)s,
+                    %(matched_tag)s, %(recall_source)s)""",
             items,
+        )
+        cur.execute(
+            "UPDATE leetcode_recommend_request SET status = 'completed', finished_at = NOW(), "
+            "error_message = NULL WHERE request_id = %s",
+            (request_id,),
         )
 
 
@@ -663,7 +705,15 @@ def upsert_pta_tag_mapping(mapping: dict[str, Any]) -> None:
 # leetcode_problem_embedding CRUD (方案 C)
 # ──────────────────────────────────────────
 
-def upsert_problem_embedding(problem_id: int, model_name: str, dim: int, blob: bytes) -> None:
+def upsert_problem_embedding(
+    problem_id: int,
+    model_name: str,
+    model_revision: str,
+    preprocessing_version: str,
+    content_hash: str,
+    dim: int,
+    blob: bytes,
+) -> None:
     """插入或更新题向量(方案 C 的离线脚本调用)。
 
     表不存在时会抛 pymysql OperationalError,调用方负责表是否已建的判断。
@@ -671,39 +721,49 @@ def upsert_problem_embedding(problem_id: int, model_name: str, dim: int, blob: b
     with transaction() as cur:
         cur.execute(
             """INSERT INTO leetcode_problem_embedding
-            (problem_id, model_name, dim, embedding_blob)
-            VALUES (%s, %s, %s, %s)
+            (problem_id, model_name, model_revision, preprocessing_version,
+             content_hash, dim, embedding_blob)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
             ON DUPLICATE KEY UPDATE
+                model_revision = VALUES(model_revision),
+                preprocessing_version = VALUES(preprocessing_version),
+                content_hash = VALUES(content_hash),
                 dim = VALUES(dim),
                 embedding_blob = VALUES(embedding_blob),
                 updated_at = CURRENT_TIMESTAMP""",
-            (problem_id, model_name, dim, blob),
+            (problem_id, model_name, model_revision, preprocessing_version,
+             content_hash, dim, blob),
         )
 
 
-def find_embedding_count() -> int:
+def find_embedding_count(
+    model_name: str,
+    model_revision: str,
+    preprocessing_version: str,
+    dim: int,
+) -> int:
     """统计已编码的题向量数(用于判断方案 C 是否可用)。"""
-    try:
-        with query() as cur:
-            cur.execute("SELECT COUNT(*) AS n FROM leetcode_problem_embedding")
-            row = cur.fetchone()
-            return int(row["n"]) if row else 0
-    except Exception:
-        # 表不存在
-        return 0
+    with query() as cur:
+        cur.execute(
+            "SELECT COUNT(*) AS n FROM leetcode_problem_embedding "
+            "WHERE model_name = %s AND model_revision = %s "
+            "AND preprocessing_version = %s AND dim = %s",
+            (model_name, model_revision, preprocessing_version, dim),
+        )
+        row = cur.fetchone()
+        return int(row["n"]) if row else 0
 
 
-def find_problem_ids_with_embeddings(model_name: str | None = None) -> set[int]:
+def find_problem_embedding_hashes(
+    model_name: str,
+    model_revision: str,
+    preprocessing_version: str,
+) -> dict[int, str]:
     """返回已编码题的 ID 集合(用于离线脚本判断哪些题还没编码)。"""
-    try:
-        with query() as cur:
-            if model_name:
-                cur.execute(
-                    "SELECT problem_id FROM leetcode_problem_embedding WHERE model_name = %s",
-                    (model_name,),
-                )
-            else:
-                cur.execute("SELECT problem_id FROM leetcode_problem_embedding")
-            return {int(r["problem_id"]) for r in cur.fetchall()}
-    except Exception:
-        return set()
+    with query() as cur:
+        cur.execute(
+            "SELECT problem_id, content_hash FROM leetcode_problem_embedding "
+            "WHERE model_name = %s AND model_revision = %s AND preprocessing_version = %s",
+            (model_name, model_revision, preprocessing_version),
+        )
+        return {int(row["problem_id"]): str(row["content_hash"]) for row in cur.fetchall()}
