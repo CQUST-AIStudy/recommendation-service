@@ -518,10 +518,29 @@ def find_problem_attempts_for_student(student_id: int) -> list[dict[str, Any]]:
     with query() as cur:
         cur.execute(
             """SELECT spa.*, ap.title AS problem_title, ap.source_problem_id,
-                      ao.title_override AS offering_title
+                      ao.title_override AS offering_title,
+                      apd.knowledge_leaf, apd.knowledge_path
             FROM student_problem_attempt spa
-            LEFT JOIN assignment_problem ap ON spa.problem_id = ap.id
+            LEFT JOIN assignment_problem ap
+              ON spa.problem_id = ap.id AND spa.offering_id = ap.offering_id
             LEFT JOIN assignment_offering ao ON spa.offering_id = ao.id
+            LEFT JOIN pta_problem_detail apd ON apd.id = (
+              SELECT pd.id FROM pta_problem_detail pd
+              WHERE (
+                    (ao.pta_problem_set_id IS NOT NULL
+                     AND pd.problem_set_id COLLATE utf8mb4_unicode_ci = ao.pta_problem_set_id COLLATE utf8mb4_unicode_ci
+                     AND (pd.problem_set_problem_id COLLATE utf8mb4_unicode_ci = ap.source_problem_id COLLATE utf8mb4_unicode_ci
+                          OR pd.problem_set_problem_id COLLATE utf8mb4_unicode_ci = ap.problem_no COLLATE utf8mb4_unicode_ci))
+                 OR (ap.source_problem_id IS NOT NULL
+                     AND pd.pta_global_problem_id COLLATE utf8mb4_unicode_ci = ap.source_problem_id COLLATE utf8mb4_unicode_ci)
+              )
+              ORDER BY CASE
+                  WHEN ao.pta_problem_set_id IS NOT NULL
+                   AND pd.problem_set_id COLLATE utf8mb4_unicode_ci = ao.pta_problem_set_id COLLATE utf8mb4_unicode_ci THEN 0
+                  ELSE 1
+              END, pd.updated_at DESC, pd.id DESC
+              LIMIT 1
+            )
             WHERE spa.student_id = %s
             ORDER BY spa.submitted_at""",
             (student_id,),

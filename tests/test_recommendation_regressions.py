@@ -9,7 +9,7 @@ from app.api.recommendation import _build_result, record_feedback_action
 from app.core.responses import ApiError
 from app.db import mysql_client
 from app.schemas.recommendation import FeedbackRequest
-from app.services import embedding_model, recall
+from app.services import embedding_model, pta_ingestion, recall, recommendation_service
 from app.services.ranking import diversity_rerank, rank_and_score
 
 
@@ -47,6 +47,58 @@ def test_mastery_zero_is_used_for_weak_centroid(monkeypatch):
         weak_threshold=60,
     )
     assert result == {"动态规划": [1.0, 0.0]}
+
+
+def test_empty_skill_profile_is_initialized_from_pta_before_fallback(monkeypatch):
+    calls = {"reads": 0, "ingestions": 0}
+
+    def fake_find_states(_student_id):
+        calls["reads"] += 1
+        if calls["reads"] == 1:
+            return []
+        return [{"tag_name": "链表", "mastery_score": 35}]
+
+    def fake_ingest(*, student_id):
+        calls["ingestions"] += 1
+        assert student_id == 7
+        return {"tags_updated": 1}
+
+    monkeypatch.setattr(db_mod, "find_all_skill_states", fake_find_states)
+    monkeypatch.setattr(pta_ingestion, "ingest_pta_data_for_student", fake_ingest)
+
+    profile = recommendation_service._load_or_initialize_skill_profile(7)
+
+    assert calls == {"reads": 2, "ingestions": 1}
+    assert profile == [{"tag_name": "链表", "mastery_score": 35}]
+
+
+def test_pta_ingestion_uses_real_knowledge_path_when_title_is_generic(monkeypatch):
+    saved_states = []
+
+    class FakeWilson:
+        @staticmethod
+        def compute_confidence(_successes, _attempts):
+            return 50.0
+
+    class FakeEngine:
+        wilson = FakeWilson()
+
+    monkeypatch.setattr(db_mod, "find_skill_state", lambda *_: None)
+    monkeypatch.setattr(db_mod, "upsert_skill_state", saved_states.append)
+    monkeypatch.setattr(recommendation_service, "get_engine", lambda: FakeEngine())
+
+    result = pta_ingestion._process_unified_attempts(7, [{
+        "problem_title": "主要元素",
+        "source_problem_id": "7-1",
+        "offering_title": "第一次练习",
+        "knowledge_leaf": "顺序表",
+        "knowledge_path": "数据结构/线性表/顺序表",
+        "judge_status": "AC",
+        "submitted_at": "2026-08-02 10:00:00",
+    }], pta_ingestion._DEFAULT_PTA_TAG_MAP)
+
+    assert result["tags_updated"] >= 1
+    assert {state["tag_name"] for state in saved_states} >= {"数组"}
 
 
 def test_completed_and_disliked_are_never_supplemented(monkeypatch):

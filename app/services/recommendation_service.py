@@ -70,6 +70,34 @@ def _get_weights() -> dict[str, float]:
     }
 
 
+def _load_skill_profile(student_id: int) -> list[dict[str, Any]]:
+    return [
+        {**state, "tag_name": canonicalize_tag_name(str(state.get("tag_name") or ""))}
+        for state in db_mod.find_all_skill_states(student_id)
+    ]
+
+
+def _load_or_initialize_skill_profile(student_id: int) -> list[dict[str, Any]]:
+    skill_profile = _load_skill_profile(student_id)
+    if skill_profile:
+        return skill_profile
+
+    # 历史 PTA 数据可能早于 webhook 接入，首次推荐时自动补建技能画像。
+    try:
+        from app.services.pta_ingestion import ingest_pta_data_for_student
+
+        ingestion = ingest_pta_data_for_student(student_id=student_id)
+        if ingestion.get("tags_updated", 0) > 0:
+            skill_profile = _load_skill_profile(student_id)
+            logger.info(
+                "Initialized %d PTA skill tags before recommendation for student %s",
+                ingestion.get("tags_updated", 0), student_id,
+            )
+    except Exception as exc:
+        logger.warning("Auto-initialize skill profile failed for student %s: %s", student_id, exc)
+    return skill_profile
+
+
 def generate_recommendation(student_id: int, limit: int = 20, scene: str = "default") -> str:
     """
     同步生成推荐并返回 request_id，供 `/sync` 和内部测试使用。
@@ -120,10 +148,7 @@ def _generate_recommendation_sync(student_id: int, limit: int, request_id: str) 
     settings = get_settings()
 
     # Step 1: 画像快照
-    skill_profile = [
-        {**state, "tag_name": canonicalize_tag_name(str(state.get("tag_name") or ""))}
-        for state in db_mod.find_all_skill_states(student_id)
-    ]
+    skill_profile = _load_or_initialize_skill_profile(student_id)
     if not skill_profile:
         logger.info("Student %s has no skill profile, using fallback", student_id)
         return _fallback_recommendations(student_id, limit, request_id, build_feedback_context(student_id))

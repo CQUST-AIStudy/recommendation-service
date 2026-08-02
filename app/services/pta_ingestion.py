@@ -31,6 +31,9 @@ _DEFAULT_PTA_TAG_MAP: dict[str, list[tuple[str, float]]] = {
     "查找": [("二分查找", 0.8)],
     "二分": [("二分查找", 0.9)],
     "链表": [("链表", 0.95)],
+    "线性表": [("链表", 0.8), ("数组", 0.6)],
+    "顺序表": [("数组", 0.9)],
+    "列表": [("链表", 0.8)],
     "栈": [("栈", 0.95)],
     "队列": [("队列", 0.95)],
     "树": [("树", 0.9)],
@@ -227,10 +230,13 @@ def _process_unified_attempts(
     for attempt in attempts:
         total_processed += 1
 
-        # 从题目标题和 source_problem_id 提取标签
+        # 优先使用 PTA 真实知识点路径/叶子；标题和题号仅作为兜底信号。
         title = attempt.get("problem_title", "") or ""
         source_id = str(attempt.get("source_problem_id", "") or "")
-        text = title + " " + source_id
+        knowledge_leaf = str(attempt.get("knowledge_leaf", "") or "")
+        knowledge_path = str(attempt.get("knowledge_path", "") or "")
+        offering_title = str(attempt.get("offering_title", "") or "")
+        text = " ".join((knowledge_path, knowledge_leaf, offering_title, title, source_id))
 
         extracted_tags = _extract_tags_from_text(text, tag_map)
         if not extracted_tags:
