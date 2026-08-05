@@ -30,6 +30,7 @@ from .mysql_client import (
     find_students_by_class,
     # 练习记录查询(原有函数,re-export 补全)
     find_problem_attempts_for_student,
+    find_problem_attempts_for_student_in_class,
     find_pta_high_frequency_errors,
     find_legacy_submit_situation,
     find_pta_tag_mappings,
@@ -54,7 +55,8 @@ __all__ = [
     "find_problem_embedding_hashes", "fetch_student_wrong_question_tags",
     "fetch_student_wrong_question_tags_by_id", "find_student_by_id",
     "find_student_by_student_no", "find_students_by_class",
-    "find_problem_attempts_for_student", "find_pta_high_frequency_errors",
+    "find_problem_attempts_for_student", "find_problem_attempts_for_student_in_class",
+    "find_pta_high_frequency_errors",
     "find_legacy_submit_situation", "find_pta_tag_mappings", "create_request",
     "get_request", "complete_request_with_items", "fail_request", "fail_stale_pending_requests",
     "find_recommend_items", "insert_feedback",

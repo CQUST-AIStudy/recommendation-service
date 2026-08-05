@@ -99,3 +99,4 @@ class FeedbackResponse(BaseModel):
 class SyncRequest(BaseModel):
     student_id: int = Field(..., alias="studentId")
     limit: int = Field(20, alias="limit", ge=1, le=50)
+    scene: str = Field("default", alias="scene")

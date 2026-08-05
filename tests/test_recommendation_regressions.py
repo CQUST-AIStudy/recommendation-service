@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from contextlib import contextmanager
 
 import pytest
@@ -10,7 +11,7 @@ from app.core.responses import ApiError
 from app.db import mysql_client
 from app.schemas.recommendation import FeedbackRequest
 from app.services import embedding_model, pta_ingestion, recall, recommendation_service
-from app.services.ranking import diversity_rerank, rank_and_score
+from app.services.ranking import compute_need_match, diversity_rerank, rank_and_score
 
 
 class FakeCursor:
@@ -70,6 +71,108 @@ def test_empty_skill_profile_is_initialized_from_pta_before_fallback(monkeypatch
 
     assert calls == {"reads": 2, "ingestions": 1}
     assert profile == [{"tag_name": "链表", "mastery_score": 35}]
+
+
+def test_pta_ingestion_rejects_unknown_numeric_student_id(monkeypatch):
+    monkeypatch.setattr(db_mod, "find_student_by_id", lambda _student_id: None)
+
+    assert pta_ingestion._resolve_student_id(student_id=987654) is None
+
+
+def test_cold_start_scores_only_observable_problem_quality(monkeypatch):
+    monkeypatch.setattr(
+        db_mod,
+        "find_problems_page",
+        lambda *_: [{"id": 11, "quality_score": 0.73}],
+    )
+
+    items = recommendation_service._fallback_recommendations(
+        student_id=7,
+        limit=1,
+        request_id="cold-start",
+        feedback_ctx=None,
+        fallback_reason="missing_skill_profile",
+    )
+
+    assert items[0]["score_total"] == pytest.approx(0.73)
+    assert items[0]["score_quality"] == pytest.approx(0.73)
+    assert items[0]["score_need_match"] == 0.0
+    assert items[0]["score_difficulty_fit"] == 0.0
+    assert items[0]["score_success_prob"] == 0.0
+    assert items[0]["score_novelty"] == 0.0
+    provenance = json.loads(items[0]["reason_json"])
+    assert provenance["recommendationMode"] == "non_personalized_fallback"
+    assert provenance["scoreBasis"] == ["problem_quality"]
+    assert provenance["fallbackReason"] == "missing_skill_profile"
+
+
+def test_empty_class_profile_never_uses_global_fallback(monkeypatch):
+    monkeypatch.setattr(
+        recommendation_service,
+        "_load_skill_profile_for_scene",
+        lambda *_: [],
+    )
+    monkeypatch.setattr(
+        db_mod,
+        "find_problems_page",
+        lambda *_: pytest.fail("class-scoped empty profile must not query global fallback"),
+    )
+
+    assert recommendation_service._generate_recommendation_sync(
+        student_id=7,
+        limit=10,
+        request_id="class-empty",
+        scene="class:8",
+    ) == []
+
+
+def test_invalid_class_scene_is_rejected():
+    with pytest.raises(ValueError, match="positive numeric class id"):
+        recommendation_service._load_skill_profile_for_scene(7, "class:not-a-number")
+
+
+def test_class_scene_builds_distinct_course_skill_profiles(monkeypatch):
+    attempts_by_class = {
+        8: [{"knowledge_path": "数据结构/线性表/链表", "judge_status": "WA"}],
+        9: [{"knowledge_path": "算法设计/动态规划", "judge_status": "AC"}],
+    }
+    monkeypatch.setattr(
+        db_mod,
+        "find_problem_attempts_for_student_in_class",
+        lambda student_id, class_id: attempts_by_class[class_id],
+    )
+    monkeypatch.setattr(
+        pta_ingestion,
+        "_get_pta_tag_map",
+        lambda: {"链表": [("链表", 1.0)], "动态规划": [("动态规划", 1.0)]},
+    )
+
+    data_structure_profile = recommendation_service._load_skill_profile_for_scene(37, "class:8")
+    algorithm_profile = recommendation_service._load_skill_profile_for_scene(37, "class:9")
+
+    assert {state["tag_name"] for state in data_structure_profile} == {"链表"}
+    assert {state["tag_name"] for state in algorithm_profile} == {"动态规划"}
+    assert data_structure_profile != algorithm_profile
+
+    monkeypatch.setattr(
+        db_mod,
+        "find_problem_ids_by_tag_names",
+        lambda tags: [101] if "链表" in tags else [202],
+    )
+    monkeypatch.setattr(
+        db_mod,
+        "find_problems_by_ids",
+        lambda ids: [{"id": pid, "title_main": "链表反转" if pid == 101 else "最长递增子序列"}
+                     for pid in ids],
+    )
+    data_structure_titles = [
+        item["title_main"] for item in recall.recall_by_weakness(data_structure_profile, 5)
+    ]
+    algorithm_titles = [
+        item["title_main"] for item in recall.recall_by_weakness(algorithm_profile, 5)
+    ]
+    assert data_structure_titles == ["链表反转"]
+    assert algorithm_titles == ["最长递增子序列"]
 
 
 def test_pta_ingestion_uses_real_knowledge_path_when_title_is_generic(monkeypatch):
@@ -141,6 +244,19 @@ def test_semantic_similarity_participates_in_ranking():
     ranked = rank_and_score(problems, [], None, weights)
     assert [item["problem_id"] for item in ranked] == [2, 1]
     assert ranked[0]["score_total"] == 0.9
+
+
+def test_need_match_uses_each_students_skill_profile():
+    problem = {"title_main": "最短路径", "problem_text": "", "solution_text": ""}
+    tags = [{"tag_name": "图", "relevance_score": 1.0}]
+    weak_profile = [{"tag_name": "图", "mastery_score": 20, "forgetting_score": 60}]
+    strong_profile = [{"tag_name": "图", "mastery_score": 90, "forgetting_score": 10}]
+
+    weak_match = compute_need_match(problem, weak_profile, tags)
+    strong_match = compute_need_match(problem, strong_profile, tags)
+
+    assert weak_match > strong_match
+    assert weak_match != pytest.approx(0.5)
 
 
 def test_diversity_relaxation_is_explicit():

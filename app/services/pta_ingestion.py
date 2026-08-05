@@ -86,8 +86,11 @@ def _resolve_student_id(student_id: int | None = None,
         profile = db_mod.find_student_by_id(student_id)
         if profile:
             return profile["id"]
-        # 可能是 legacy student_id，直接返回
-        return student_id
+        logger.warning(
+            "student_id=%s not found in student_profile; refusing ambiguous legacy lookup",
+            student_id,
+        )
+        return None
 
     if student_no is not None:
         profile = db_mod.find_student_by_student_no(student_no)
@@ -156,6 +159,53 @@ def _is_accepted(status: str | None) -> bool:
     return status.strip() in _ACCEPTED_STATUSES
 
 
+def build_skill_profile_from_attempts(
+    attempts: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Build a non-persistent skill snapshot from one course/class attempt set."""
+    tag_map = _get_pta_tag_map()
+    tag_stats: dict[str, dict[str, Any]] = defaultdict(
+        lambda: {"attempts": 0, "successes": 0, "last_correct_at": None}
+    )
+    for attempt in attempts:
+        text = " ".join((
+            str(attempt.get("knowledge_path", "") or ""),
+            str(attempt.get("knowledge_leaf", "") or ""),
+            str(attempt.get("offering_title", "") or ""),
+            str(attempt.get("problem_title", "") or ""),
+            str(attempt.get("source_problem_id", "") or ""),
+        ))
+        is_correct = _is_accepted(attempt.get("judge_status"))
+        for tag, _relevance in _extract_tags_from_text(text, tag_map):
+            stats = tag_stats[tag]
+            stats["attempts"] += 1
+            if is_correct:
+                stats["successes"] += 1
+                stats["last_correct_at"] = attempt.get("submitted_at")
+
+    from app.services.recommendation_service import get_engine
+    engine = get_engine()
+    profile = []
+    for tag, stats in tag_stats.items():
+        attempt_count = stats["attempts"]
+        success_count = stats["successes"]
+        success_rate = success_count / attempt_count
+        profile.append({
+            "tag_name": tag,
+            "mastery_score": round(min(95.0, success_rate * 100.0), 2),
+            "forgetting_score": round(max(0.0, (1.0 - success_rate) * 30.0), 2),
+            "confidence_score": round(
+                engine.wilson.compute_confidence(success_count, attempt_count), 2
+            ) if success_count > 0 else 0.0,
+            "attempt_count": attempt_count,
+            "success_count": success_count,
+            "avg_attempts_to_success": round(attempt_count / success_count, 2)
+            if success_count > 0 else None,
+            "last_practice_at": stats["last_correct_at"],
+        })
+    return profile
+
+
 # ──────────────────────────────────────────
 # 核心摄取函数
 # ──────────────────────────────────────────
@@ -172,7 +222,7 @@ def ingest_pta_data_for_student(
     Parameters
     ----------
     student_id : int | None
-        student_profile.id 或 legacy student_id。
+        student_profile.id；不存在画像时不会将裸数字解释为 legacy student_id。
     student_no : str | None
         学号（用于查找 student_profile）。
 

@@ -20,6 +20,11 @@ class Settings(BaseSettings):
     # ── Service ──
     service_host: str = "0.0.0.0"
     service_port: int = 8003
+    cors_origins: str = (
+        "http://localhost:5173,http://127.0.0.1:5173,"
+        "http://localhost:8080,http://127.0.0.1:8080"
+    )
+    cors_allow_credentials: bool = True
     recommendation_pending_timeout_seconds: int = Field(60, ge=10, le=3600)
 
     # ── Recommendation weights ──
@@ -85,6 +90,10 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_recommendation_config(self) -> "Settings":
+        if not self.cors_origin_list:
+            raise ValueError("CORS_ORIGINS must contain at least one origin")
+        if self.cors_allow_credentials and "*" in self.cors_origin_list:
+            raise ValueError("CORS_ORIGINS cannot contain '*' when credentials are enabled")
         if self.recall_weak_ratio + self.recall_difficulty_ratio + self.recall_exploration_ratio <= 0:
             raise ValueError("at least one base recall ratio must be positive")
         positive_weights = (
@@ -102,8 +111,8 @@ class Settings(BaseSettings):
         return self
 
     @property
-    def cors_origins(self) -> list[str]:
-        return ["*"]
+    def cors_origin_list(self) -> list[str]:
+        return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
 
 
 _settings: Settings | None = None

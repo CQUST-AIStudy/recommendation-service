@@ -16,6 +16,14 @@ if (-not (Test-Path (Join-Path $PSScriptRoot ".venv"))) {
   }
 }
 
-Write-Host "Starting recommendation service on http://127.0.0.1:8003 ..." -ForegroundColor Cyan
-uv run uvicorn app.main:app --host 0.0.0.0 --port 8003 --reload
+$serviceConfigJson = uv run python -c "import json; from app.core.config import get_settings; s = get_settings(); print(json.dumps({'host': s.service_host, 'port': s.service_port}))"
+if ($LASTEXITCODE -ne 0) {
+  exit $LASTEXITCODE
+}
+$serviceConfig = $serviceConfigJson | ConvertFrom-Json
+$serviceHost = [string]$serviceConfig.host
+$servicePort = [int]$serviceConfig.port
+
+Write-Host "Starting recommendation service on http://127.0.0.1:$servicePort ..." -ForegroundColor Cyan
+uv run uvicorn app.main:app --host $serviceHost --port $servicePort --reload
 exit $LASTEXITCODE

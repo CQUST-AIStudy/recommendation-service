@@ -8,6 +8,9 @@ build/
 *.egg
 .env
 .env.docker
+.env.*
+!.env.example
+!.env.docker.example
 .venv/
 venv/
 *.so

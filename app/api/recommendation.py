@@ -208,7 +208,7 @@ def generate_recommendation_sync(request: SyncRequest):
         request_id = recommendation_service.generate_recommendation(
             student_id=request.student_id,
             limit=request.limit,
-            scene="default",
+            scene=request.scene,
         )
         # 立即查询结果（generate 内部已同步完成）
         req = db_mod.get_request(request_id)

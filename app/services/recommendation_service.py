@@ -98,6 +98,39 @@ def _load_or_initialize_skill_profile(student_id: int) -> list[dict[str, Any]]:
     return skill_profile
 
 
+def _class_id_from_scene(scene: str | None) -> int | None:
+    prefix = "class:"
+    normalized = str(scene or "").strip().lower()
+    if not normalized.startswith(prefix):
+        return None
+    value = normalized[len(prefix):]
+    return int(value) if value.isdigit() and int(value) > 0 else None
+
+
+def _is_class_scene(scene: str | None) -> bool:
+    return str(scene or "").strip().lower().startswith("class:")
+
+
+def _load_skill_profile_for_scene(
+    student_id: int, scene: str | None
+) -> list[dict[str, Any]]:
+    class_id = _class_id_from_scene(scene)
+    if class_id is None:
+        if _is_class_scene(scene):
+            raise ValueError("class scene must use a positive numeric class id")
+        return _load_or_initialize_skill_profile(student_id)
+
+    from app.services.pta_ingestion import build_skill_profile_from_attempts
+
+    attempts = db_mod.find_problem_attempts_for_student_in_class(student_id, class_id)
+    profile = build_skill_profile_from_attempts(attempts)
+    logger.info(
+        "Loaded class-scoped skill profile student_id=%s class_id=%s tags=%s",
+        student_id, class_id, len(profile),
+    )
+    return profile
+
+
 def generate_recommendation(student_id: int, limit: int = 20, scene: str = "default") -> str:
     """
     同步生成推荐并返回 request_id，供 `/sync` 和内部测试使用。
@@ -133,7 +166,8 @@ def process_recommendation(request_id: str, student_id: int, limit: int) -> None
         ):
             db_mod.fail_request(request_id, "recommendation expired before processing")
             return
-        items = _generate_recommendation_sync(student_id, limit, request_id)
+        scene = str(request.get("scene") or "default") if request else "default"
+        items = _generate_recommendation_sync(student_id, limit, request_id, scene)
         if not items:
             db_mod.fail_request(request_id, "no recommendation generated")
         else:
@@ -143,15 +177,30 @@ def process_recommendation(request_id: str, student_id: int, limit: int) -> None
         logger.error("Recommendation failed: request_id=%s student_id=%s: %s", request_id, student_id, exc)
 
 
-def _generate_recommendation_sync(student_id: int, limit: int, request_id: str) -> list[dict[str, Any]]:
+def _generate_recommendation_sync(
+    student_id: int, limit: int, request_id: str, scene: str = "default"
+) -> list[dict[str, Any]]:
     """完整的6步推荐流水线。"""
     settings = get_settings()
 
     # Step 1: 画像快照
-    skill_profile = _load_or_initialize_skill_profile(student_id)
+    skill_profile = _load_skill_profile_for_scene(student_id, scene)
     if not skill_profile:
-        logger.info("Student %s has no skill profile, using fallback", student_id)
-        return _fallback_recommendations(student_id, limit, request_id, build_feedback_context(student_id))
+        if _is_class_scene(scene):
+            logger.info(
+                "Student %s has no class-scoped skill profile for scene=%s; refusing global fallback",
+                student_id,
+                scene,
+            )
+            return []
+        logger.info("Student %s has no skill profile, using non-personalized fallback", student_id)
+        return _fallback_recommendations(
+            student_id,
+            limit,
+            request_id,
+            build_feedback_context(student_id),
+            fallback_reason="missing_skill_profile",
+        )
 
     # Step 2: 反馈上下文 + 错题本上下文
     feedback_ctx = build_feedback_context(student_id)
@@ -197,7 +246,20 @@ def _generate_recommendation_sync(student_id: int, limit: int, request_id: str) 
     )
 
     if not candidates:
-        return _fallback_recommendations(student_id, limit, request_id, feedback_ctx)
+        if _is_class_scene(scene):
+            logger.info(
+                "No class-scoped candidates for student_id=%s scene=%s; refusing global fallback",
+                student_id,
+                scene,
+            )
+            return []
+        return _fallback_recommendations(
+            student_id,
+            limit,
+            request_id,
+            feedback_ctx,
+            fallback_reason="no_personalized_candidates",
+        )
 
     # 预加载题目标签
     problem_ids = list(candidates.keys())
@@ -277,9 +339,14 @@ def _fallback_recommendations(
     limit: int,
     request_id: str,
     feedback_ctx: dict[str, Any] | None,
+    fallback_reason: str,
 ) -> list[dict[str, Any]]:
-    """兜底推荐：按质量分排序取前N题。"""
-    logger.warning("Using fallback recommendations for student_id=%s", student_id)
+    """Return a clearly non-personalized quality-only fallback."""
+    logger.warning(
+        "Using non-personalized fallback for student_id=%s reason=%s",
+        student_id,
+        fallback_reason,
+    )
     excluded = set((feedback_ctx or {}).get("completed_problem_ids", []))
     excluded.update((feedback_ctx or {}).get("disliked_problem_ids", []))
     problems = [
@@ -289,28 +356,43 @@ def _fallback_recommendations(
 
     items = []
     for i, problem in enumerate(problems):
+        try:
+            quality_score = max(0.0, min(1.0, float(problem.get("quality_score") or 0.0)))
+        except (TypeError, ValueError):
+            quality_score = 0.0
+        provenance = {
+            "strategyVersion": "v2",
+            "recommendationMode": "non_personalized_fallback",
+            "fallbackReason": fallback_reason,
+            "scoreBasis": ["problem_quality"],
+            "unavailableSignals": [
+                "need_match",
+                "difficulty_fit",
+                "success_probability",
+                "novelty",
+                "semantic_similarity",
+            ],
+            "recallSources": ["cold_start_quality"],
+            "semanticScore": 0.0,
+            "matchedTag": None,
+            "diversityRelaxed": False,
+        }
         item = {
             "request_id": request_id,
             "student_id": student_id,
             "rank_no": i + 1,
             "problem_id": problem["id"],
-            "score_total": 0.6,
-            "score_need_match": 0.5,
-            "score_difficulty_fit": 0.6,
-            "score_success_prob": 0.6,
-            "score_novelty": 0.7,
-            "score_quality": 0.8,
+            "score_total": quality_score,
+            "score_need_match": 0.0,
+            "score_difficulty_fit": 0.0,
+            "score_success_prob": 0.0,
+            "score_novelty": 0.0,
+            "score_quality": quality_score,
             "score_semantic": 0.0,
-            "reason_text": "当前画像不足，按题目质量提供冷启动推荐。",
-            "reason_json": json.dumps({
-                "strategyVersion": "v2",
-                "recallSources": ["fallback"],
-                "semanticScore": 0.0,
-                "matchedTag": None,
-                "diversityRelaxed": False,
-            }),
+            "reason_text": "暂无可用个性化画像；本题仅按题库质量排序，个性化分数未计算。",
+            "reason_json": json.dumps(provenance, ensure_ascii=False),
             "matched_tag": None,
-            "recall_source": "fallback",
+            "recall_source": "cold_start_quality",
         }
         items.append(item)
 
