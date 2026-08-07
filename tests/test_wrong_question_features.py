@@ -8,7 +8,7 @@ def test_pta_error_context_exposes_knowledge_metadata(monkeypatch):
     monkeypatch.setattr(
         db_mod,
         "find_pta_high_frequency_errors",
-        lambda student_id, min_errors: [
+        lambda student_id, min_errors, class_id=None: [
             {
                 "problem_id": 9,
                 "error_count": 3,

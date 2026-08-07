@@ -600,18 +600,26 @@ def find_problem_states_for_student(student_id: int) -> list[dict[str, Any]]:
 
 
 def find_pta_high_frequency_errors(
-    student_id: int, min_errors: int = 5
+    student_id: int, min_errors: int = 5, class_id: int | None = None
 ) -> list[dict[str, Any]]:
     """返回 PTA 题目中累计错误次数 ≥ min_errors 的高频错题。
 
     直接在 student_problem_attempt 上按 (student_id, offering_id, problem_id) 分组，
     统计 judge_status 为非 AC 的提交次数，过滤 >= min_errors 的题目。
+
+    当 class_id 不为 None 时，只统计该班级下 offering 的提交记录，
+    避免不同课程的 PTA 错误信号串入当前课程推荐。
     """
     accepted_statuses = (
         "AC", "ACCEPTED", "CORRECT", "PASS", "100",
         "满分", "成功", "通过", "PASSED", "答案正确",
     )
     placeholders = ",".join(["%s"] * len(accepted_statuses))
+    class_filter = " AND ao.class_id = %s" if class_id is not None else ""
+    params: list[Any] = [*accepted_statuses, *accepted_statuses, student_id]
+    if class_id is not None:
+        params.append(class_id)
+    params.append(min_errors)
     with query() as cur:
         cur.execute(
             f"""SELECT
@@ -641,14 +649,14 @@ def find_pta_high_frequency_errors(
                   ao.source_offering_key = CONCAT('LEGACY_EXPERIMENT_OFFERING:', apd.experiment_id)
                   OR (ao.pta_problem_set_id IS NOT NULL AND apd.problem_set_id = ao.pta_problem_set_id)
                 )
-               WHERE spa.student_id = %s
+               WHERE spa.student_id = %s{class_filter}
                GROUP BY spa.student_id, spa.offering_id, spa.problem_id,
                          ap.title, ap.problem_no, ap.source_problem_id,
                          ao.title_override, ao.pta_problem_set_id
                HAVING error_count >= %s
                ORDER BY error_count DESC
                LIMIT 50""",
-            (*accepted_statuses, *accepted_statuses, student_id, min_errors),
+            tuple(params),
         )
         return cur.fetchall()
 

@@ -224,15 +224,20 @@ def generate_recommendation_sync(request: SyncRequest):
 
 
 @router.get("/pta-errors")
-def get_pta_high_frequency_errors(student_no: str = Query(..., min_length=1), min_errors: int = 5):
+def get_pta_high_frequency_errors(
+    student_no: str = Query(..., min_length=1),
+    min_errors: int = 5,
+    class_id: int | None = Query(None, ge=1),
+):
     """返回某个学生 PTA 累计错误 ≥ min_errors 的高频错题列表。
 
     本接口按学号（student_no）查询，内部自动解析为 student_profile.id 后查询提交记录。
+    当提供 class_id 时，只返回该班级下 offering 的错题，避免跨课程数据泄漏。
     调用方（Java 网关）应从登录会话获取当前学生的学号，不得由学生客户端指定他人学号。
     """
     try:
         from app.services.wrong_question_features import load_pta_error_context_by_no
-        ctx = load_pta_error_context_by_no(student_no, min_errors)
+        ctx = load_pta_error_context_by_no(student_no, min_errors, class_id=class_id)
         return api_success({
             "student_no": student_no,
             "min_errors": min_errors,

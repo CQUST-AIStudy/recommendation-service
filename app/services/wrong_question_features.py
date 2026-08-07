@@ -35,26 +35,36 @@ def load_wrong_question_context_by_no(student_no: str) -> dict[str, Any]:
     return _build_context(rows)
 
 
-def load_pta_error_context_by_no(student_no: str, min_errors: int = 5) -> dict[str, Any]:
-    """按学号加载 PTA 高频错题上下文，内部解析为 student_profile.id 后查询。"""
+def load_pta_error_context_by_no(
+    student_no: str, min_errors: int = 5, class_id: int | None = None
+) -> dict[str, Any]:
+    """按学号加载 PTA 高频错题上下文，内部解析为 student_profile.id 后查询。
+
+    当 class_id 不为 None 时，只统计该班级下 offering 的提交记录。
+    """
     if not student_no:
         return _empty_pta_context()
     profile = db_mod.find_student_by_student_no(student_no)
     if not profile or not profile.get("id"):
         logger.info("No student_profile found for student_no=%s", student_no)
         return _empty_pta_context()
-    return load_pta_error_context(profile["id"], min_errors)
+    return load_pta_error_context(profile["id"], min_errors, class_id=class_id)
 
 
-def load_pta_error_context(student_id: int, min_errors: int = 5) -> dict[str, Any]:
+def load_pta_error_context(
+    student_id: int, min_errors: int = 5, class_id: int | None = None
+) -> dict[str, Any]:
     """Load PTA problems where the student has ≥ min_errors wrong attempts.
 
     Returns context with per-problem error counts and tag counts from the
     pta_tag_mapping table for use in the ranking boost.
+
+    When class_id is not None, only attempts belonging to offerings in that
+    teaching class are counted, preventing cross-course PTA error leakage.
     """
     if not student_id:
         return _empty_pta_context()
-    rows = db_mod.find_pta_high_frequency_errors(student_id, min_errors)
+    rows = db_mod.find_pta_high_frequency_errors(student_id, min_errors, class_id=class_id)
 
     pta_items = []
     tag_counts: dict[str, int] = _load_pta_error_tags_from_db(student_id, rows)

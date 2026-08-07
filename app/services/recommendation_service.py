@@ -203,6 +203,7 @@ def _generate_recommendation_sync(
         )
 
     # Step 2: 反馈上下文 + 错题本上下文
+    class_id = _class_id_from_scene(scene)
     feedback_ctx = build_feedback_context(student_id)
 
     from app.services.wrong_question_features import (
@@ -216,7 +217,7 @@ def _generate_recommendation_sync(
         wrong_question_ctx = None
 
     try:
-        pta_error_ctx = load_pta_error_context(student_id, min_errors=5)
+        pta_error_ctx = load_pta_error_context(student_id, min_errors=5, class_id=class_id)
     except Exception as exc:
         logger.warning("Failed to load PTA error context (will continue without PTA boost): %s", exc, exc_info=True)
         pta_error_ctx = None
